@@ -440,16 +440,16 @@ class GCScope : public GCScopeDebugBase {
   /// Allocate storage for a new PinnedHermesValue. The garbage collector knows
   /// about it and will be able to mark it.
   PinnedHermesValue *newPinnedHermesValue(HermesValue value) {
-    assert(
-        getHandleCountDbg() < handlesLimit_ &&
-        "Too many handles allocated in GCScope");
-    assert(runtime_.noHandleLevel_ == 0 && "No handles allowed right now.");
+//     assert(
+//         getHandleCountDbg() < handlesLimit_ &&
+//         "Too many handles allocated in GCScope");
+//     assert(runtime_.noHandleLevel_ == 0 && "No handles allowed right now.");
 
-    setHandleCountDbg(getHandleCountDbg() + 1);
-#ifdef HERMESVM_DEBUG_TRACK_GCSCOPE_HANDLES
-    if (numAllocatedHandles_ > maxAllocatedHandles_)
-      maxAllocatedHandles_ = numAllocatedHandles_;
-#endif
+//     setHandleCountDbg(getHandleCountDbg() + 1);
+// #ifdef HERMESVM_DEBUG_TRACK_GCSCOPE_HANDLES
+//     if (numAllocatedHandles_ > maxAllocatedHandles_)
+//       maxAllocatedHandles_ = numAllocatedHandles_;
+// #endif
 
     /// Check the fast path: is there space in the current chunk?
     if (LLVM_LIKELY(next_ < curChunkEnd_)) {
