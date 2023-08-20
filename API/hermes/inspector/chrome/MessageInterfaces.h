@@ -30,20 +30,13 @@ struct Serializable {
   virtual ~Serializable() = default;
   virtual JSONValue *toJsonVal(JSONFactory &factory) const = 0;
 
-  std::string toJsonStr() const {
-    JSLexer::Allocator alloc;
-    JSONFactory factory(alloc);
-    return jsonValToStr(toJsonVal(factory));
-  }
+  std::string toJsonStr() const;
 };
 
 /// Requests are sent from the debugger to the target.
 struct Request : public Serializable {
   using ParseResult = std::variant<std::unique_ptr<Request>, std::string>;
-  static std::unique_ptr<Request> fromJsonThrowOnError(const std::string &str);
-  // This method parses the given JSON string and creates a Request object if
-  // successful, otherwise it returns an error message.
-  static ParseResult fromJson(const std::string &str);
+  static std::unique_ptr<Request> fromJson(const std::string &str);
 
   Request() = default;
   explicit Request(std::string method) : method(method) {}
@@ -52,7 +45,7 @@ struct Request : public Serializable {
   // on the type of the request.
   virtual void accept(RequestHandler &handler) const = 0;
 
-  int id = 0;
+  long long id = 0;
   std::string method;
 };
 
@@ -60,7 +53,7 @@ struct Request : public Serializable {
 struct Response : public Serializable {
   Response() = default;
 
-  int id = 0;
+  long long id = 0;
 };
 
 /// Notifications are sent from the target to the debugger. This is used to

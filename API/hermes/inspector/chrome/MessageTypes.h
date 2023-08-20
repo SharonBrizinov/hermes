@@ -1,5 +1,5 @@
 // Copyright (c) Meta Platforms, Inc. and affiliates. All Rights Reserved.
-// @generated SignedSource<<1659b66ac5308bb260e4873724efc20f>>
+// @generated SignedSource<<119b7394edbf0cff18855b5c87fad402>>
 
 #pragma once
 
@@ -67,7 +67,7 @@ struct EvaluateResponse;
 struct ExceptionDetails;
 struct ExecutionContextCreatedNotification;
 struct ExecutionContextDescription;
-using ExecutionContextId = int;
+using ExecutionContextId = long long;
 struct GetHeapUsageRequest;
 struct GetHeapUsageResponse;
 struct GetPropertiesRequest;
@@ -209,21 +209,21 @@ struct debugger::Location : public Serializable {
   Location() = default;
   Location(Location &&) = default;
   Location(const Location &) = delete;
-  explicit Location(const JSONObject *obj);
+  static std::unique_ptr<Location> tryMake(const JSONObject *obj);
   JSONValue *toJsonVal(JSONFactory &factory) const override;
   Location &operator=(const Location &) = delete;
   Location &operator=(Location &&) = default;
 
   runtime::ScriptId scriptId{};
-  int lineNumber{};
-  std::optional<int> columnNumber;
+  long long lineNumber{};
+  std::optional<long long> columnNumber;
 };
 
 struct runtime::PropertyPreview : public Serializable {
   PropertyPreview() = default;
   PropertyPreview(PropertyPreview &&) = default;
   PropertyPreview(const PropertyPreview &) = delete;
-  explicit PropertyPreview(const JSONObject *obj);
+  static std::unique_ptr<PropertyPreview> tryMake(const JSONObject *obj);
   JSONValue *toJsonVal(JSONFactory &factory) const override;
   PropertyPreview &operator=(const PropertyPreview &) = delete;
   PropertyPreview &operator=(PropertyPreview &&) = default;
@@ -242,7 +242,7 @@ struct runtime::EntryPreview : public Serializable {
   EntryPreview() = default;
   EntryPreview(EntryPreview &&) = default;
   EntryPreview(const EntryPreview &) = delete;
-  explicit EntryPreview(const JSONObject *obj);
+  static std::unique_ptr<EntryPreview> tryMake(const JSONObject *obj);
   JSONValue *toJsonVal(JSONFactory &factory) const override;
   EntryPreview &operator=(const EntryPreview &) = delete;
   EntryPreview &operator=(EntryPreview &&) = default;
@@ -261,7 +261,7 @@ struct runtime::ObjectPreview : public Serializable {
   ObjectPreview() = default;
   ObjectPreview(ObjectPreview &&) = default;
   ObjectPreview(const ObjectPreview &) = delete;
-  explicit ObjectPreview(const JSONObject *obj);
+  static std::unique_ptr<ObjectPreview> tryMake(const JSONObject *obj);
   JSONValue *toJsonVal(JSONFactory &factory) const override;
   ObjectPreview &operator=(const ObjectPreview &) = delete;
   ObjectPreview &operator=(ObjectPreview &&) = default;
@@ -278,7 +278,7 @@ struct runtime::CustomPreview : public Serializable {
   CustomPreview() = default;
   CustomPreview(CustomPreview &&) = default;
   CustomPreview(const CustomPreview &) = delete;
-  explicit CustomPreview(const JSONObject *obj);
+  static std::unique_ptr<CustomPreview> tryMake(const JSONObject *obj);
   JSONValue *toJsonVal(JSONFactory &factory) const override;
   CustomPreview &operator=(const CustomPreview &) = delete;
   CustomPreview &operator=(CustomPreview &&) = default;
@@ -291,7 +291,7 @@ struct runtime::RemoteObject : public Serializable {
   RemoteObject() = default;
   RemoteObject(RemoteObject &&) = default;
   RemoteObject(const RemoteObject &) = delete;
-  explicit RemoteObject(const JSONObject *obj);
+  static std::unique_ptr<RemoteObject> tryMake(const JSONObject *obj);
   JSONValue *toJsonVal(JSONFactory &factory) const override;
   RemoteObject &operator=(const RemoteObject &) = delete;
   RemoteObject &operator=(RemoteObject &&) = default;
@@ -311,7 +311,7 @@ struct runtime::CallFrame : public Serializable {
   CallFrame() = default;
   CallFrame(CallFrame &&) = default;
   CallFrame(const CallFrame &) = delete;
-  explicit CallFrame(const JSONObject *obj);
+  static std::unique_ptr<CallFrame> tryMake(const JSONObject *obj);
   JSONValue *toJsonVal(JSONFactory &factory) const override;
   CallFrame &operator=(const CallFrame &) = delete;
   CallFrame &operator=(CallFrame &&) = default;
@@ -319,15 +319,15 @@ struct runtime::CallFrame : public Serializable {
   std::string functionName;
   runtime::ScriptId scriptId{};
   std::string url;
-  int lineNumber{};
-  int columnNumber{};
+  long long lineNumber{};
+  long long columnNumber{};
 };
 
 struct runtime::StackTrace : public Serializable {
   StackTrace() = default;
   StackTrace(StackTrace &&) = default;
   StackTrace(const StackTrace &) = delete;
-  explicit StackTrace(const JSONObject *obj);
+  static std::unique_ptr<StackTrace> tryMake(const JSONObject *obj);
   JSONValue *toJsonVal(JSONFactory &factory) const override;
   StackTrace &operator=(const StackTrace &) = delete;
   StackTrace &operator=(StackTrace &&) = default;
@@ -341,15 +341,15 @@ struct runtime::ExceptionDetails : public Serializable {
   ExceptionDetails() = default;
   ExceptionDetails(ExceptionDetails &&) = default;
   ExceptionDetails(const ExceptionDetails &) = delete;
-  explicit ExceptionDetails(const JSONObject *obj);
+  static std::unique_ptr<ExceptionDetails> tryMake(const JSONObject *obj);
   JSONValue *toJsonVal(JSONFactory &factory) const override;
   ExceptionDetails &operator=(const ExceptionDetails &) = delete;
   ExceptionDetails &operator=(ExceptionDetails &&) = default;
 
-  int exceptionId{};
+  long long exceptionId{};
   std::string text;
-  int lineNumber{};
-  int columnNumber{};
+  long long lineNumber{};
+  long long columnNumber{};
   std::optional<runtime::ScriptId> scriptId;
   std::optional<std::string> url;
   std::optional<runtime::StackTrace> stackTrace;
@@ -361,7 +361,7 @@ struct debugger::Scope : public Serializable {
   Scope() = default;
   Scope(Scope &&) = default;
   Scope(const Scope &) = delete;
-  explicit Scope(const JSONObject *obj);
+  static std::unique_ptr<Scope> tryMake(const JSONObject *obj);
   JSONValue *toJsonVal(JSONFactory &factory) const override;
   Scope &operator=(const Scope &) = delete;
   Scope &operator=(Scope &&) = default;
@@ -377,7 +377,7 @@ struct debugger::CallFrame : public Serializable {
   CallFrame() = default;
   CallFrame(CallFrame &&) = default;
   CallFrame(const CallFrame &) = delete;
-  explicit CallFrame(const JSONObject *obj);
+  static std::unique_ptr<CallFrame> tryMake(const JSONObject *obj);
   JSONValue *toJsonVal(JSONFactory &factory) const override;
   CallFrame &operator=(const CallFrame &) = delete;
   CallFrame &operator=(CallFrame &&) = default;
@@ -396,14 +396,15 @@ struct heapProfiler::SamplingHeapProfileNode : public Serializable {
   SamplingHeapProfileNode() = default;
   SamplingHeapProfileNode(SamplingHeapProfileNode &&) = default;
   SamplingHeapProfileNode(const SamplingHeapProfileNode &) = delete;
-  explicit SamplingHeapProfileNode(const JSONObject *obj);
+  static std::unique_ptr<SamplingHeapProfileNode> tryMake(
+      const JSONObject *obj);
   JSONValue *toJsonVal(JSONFactory &factory) const override;
   SamplingHeapProfileNode &operator=(const SamplingHeapProfileNode &) = delete;
   SamplingHeapProfileNode &operator=(SamplingHeapProfileNode &&) = default;
 
   runtime::CallFrame callFrame{};
   double selfSize{};
-  int id{};
+  long long id{};
   std::vector<heapProfiler::SamplingHeapProfileNode> children;
 };
 
@@ -411,14 +412,15 @@ struct heapProfiler::SamplingHeapProfileSample : public Serializable {
   SamplingHeapProfileSample() = default;
   SamplingHeapProfileSample(SamplingHeapProfileSample &&) = default;
   SamplingHeapProfileSample(const SamplingHeapProfileSample &) = delete;
-  explicit SamplingHeapProfileSample(const JSONObject *obj);
+  static std::unique_ptr<SamplingHeapProfileSample> tryMake(
+      const JSONObject *obj);
   JSONValue *toJsonVal(JSONFactory &factory) const override;
   SamplingHeapProfileSample &operator=(const SamplingHeapProfileSample &) =
       delete;
   SamplingHeapProfileSample &operator=(SamplingHeapProfileSample &&) = default;
 
   double size{};
-  int nodeId{};
+  long long nodeId{};
   double ordinal{};
 };
 
@@ -426,7 +428,7 @@ struct heapProfiler::SamplingHeapProfile : public Serializable {
   SamplingHeapProfile() = default;
   SamplingHeapProfile(SamplingHeapProfile &&) = default;
   SamplingHeapProfile(const SamplingHeapProfile &) = delete;
-  explicit SamplingHeapProfile(const JSONObject *obj);
+  static std::unique_ptr<SamplingHeapProfile> tryMake(const JSONObject *obj);
   JSONValue *toJsonVal(JSONFactory &factory) const override;
   SamplingHeapProfile &operator=(const SamplingHeapProfile &) = delete;
   SamplingHeapProfile &operator=(SamplingHeapProfile &&) = default;
@@ -439,28 +441,28 @@ struct profiler::PositionTickInfo : public Serializable {
   PositionTickInfo() = default;
   PositionTickInfo(PositionTickInfo &&) = default;
   PositionTickInfo(const PositionTickInfo &) = delete;
-  explicit PositionTickInfo(const JSONObject *obj);
+  static std::unique_ptr<PositionTickInfo> tryMake(const JSONObject *obj);
   JSONValue *toJsonVal(JSONFactory &factory) const override;
   PositionTickInfo &operator=(const PositionTickInfo &) = delete;
   PositionTickInfo &operator=(PositionTickInfo &&) = default;
 
-  int line{};
-  int ticks{};
+  long long line{};
+  long long ticks{};
 };
 
 struct profiler::ProfileNode : public Serializable {
   ProfileNode() = default;
   ProfileNode(ProfileNode &&) = default;
   ProfileNode(const ProfileNode &) = delete;
-  explicit ProfileNode(const JSONObject *obj);
+  static std::unique_ptr<ProfileNode> tryMake(const JSONObject *obj);
   JSONValue *toJsonVal(JSONFactory &factory) const override;
   ProfileNode &operator=(const ProfileNode &) = delete;
   ProfileNode &operator=(ProfileNode &&) = default;
 
-  int id{};
+  long long id{};
   runtime::CallFrame callFrame{};
-  std::optional<int> hitCount;
-  std::optional<std::vector<int>> children;
+  std::optional<long long> hitCount;
+  std::optional<std::vector<long long>> children;
   std::optional<std::string> deoptReason;
   std::optional<std::vector<profiler::PositionTickInfo>> positionTicks;
 };
@@ -469,7 +471,7 @@ struct profiler::Profile : public Serializable {
   Profile() = default;
   Profile(Profile &&) = default;
   Profile(const Profile &) = delete;
-  explicit Profile(const JSONObject *obj);
+  static std::unique_ptr<Profile> tryMake(const JSONObject *obj);
   JSONValue *toJsonVal(JSONFactory &factory) const override;
   Profile &operator=(const Profile &) = delete;
   Profile &operator=(Profile &&) = default;
@@ -477,15 +479,15 @@ struct profiler::Profile : public Serializable {
   std::vector<profiler::ProfileNode> nodes;
   double startTime{};
   double endTime{};
-  std::optional<std::vector<int>> samples;
-  std::optional<std::vector<int>> timeDeltas;
+  std::optional<std::vector<long long>> samples;
+  std::optional<std::vector<long long>> timeDeltas;
 };
 
 struct runtime::CallArgument : public Serializable {
   CallArgument() = default;
   CallArgument(CallArgument &&) = default;
   CallArgument(const CallArgument &) = delete;
-  explicit CallArgument(const JSONObject *obj);
+  static std::unique_ptr<CallArgument> tryMake(const JSONObject *obj);
   JSONValue *toJsonVal(JSONFactory &factory) const override;
   CallArgument &operator=(const CallArgument &) = delete;
   CallArgument &operator=(CallArgument &&) = default;
@@ -499,7 +501,8 @@ struct runtime::ExecutionContextDescription : public Serializable {
   ExecutionContextDescription() = default;
   ExecutionContextDescription(ExecutionContextDescription &&) = default;
   ExecutionContextDescription(const ExecutionContextDescription &) = delete;
-  explicit ExecutionContextDescription(const JSONObject *obj);
+  static std::unique_ptr<ExecutionContextDescription> tryMake(
+      const JSONObject *obj);
   JSONValue *toJsonVal(JSONFactory &factory) const override;
   ExecutionContextDescription &operator=(const ExecutionContextDescription &) =
       delete;
@@ -516,7 +519,7 @@ struct runtime::PropertyDescriptor : public Serializable {
   PropertyDescriptor() = default;
   PropertyDescriptor(PropertyDescriptor &&) = default;
   PropertyDescriptor(const PropertyDescriptor &) = delete;
-  explicit PropertyDescriptor(const JSONObject *obj);
+  static std::unique_ptr<PropertyDescriptor> tryMake(const JSONObject *obj);
   JSONValue *toJsonVal(JSONFactory &factory) const override;
   PropertyDescriptor &operator=(const PropertyDescriptor &) = delete;
   PropertyDescriptor &operator=(PropertyDescriptor &&) = default;
@@ -537,7 +540,8 @@ struct runtime::InternalPropertyDescriptor : public Serializable {
   InternalPropertyDescriptor() = default;
   InternalPropertyDescriptor(InternalPropertyDescriptor &&) = default;
   InternalPropertyDescriptor(const InternalPropertyDescriptor &) = delete;
-  explicit InternalPropertyDescriptor(const JSONObject *obj);
+  static std::unique_ptr<InternalPropertyDescriptor> tryMake(
+      const JSONObject *obj);
   JSONValue *toJsonVal(JSONFactory &factory) const override;
   InternalPropertyDescriptor &operator=(const InternalPropertyDescriptor &) =
       delete;
@@ -551,7 +555,7 @@ struct runtime::InternalPropertyDescriptor : public Serializable {
 /// Requests
 struct UnknownRequest : public Request {
   UnknownRequest();
-  explicit UnknownRequest(const JSONObject *obj);
+  static std::unique_ptr<UnknownRequest> tryMake(const JSONObject *obj);
 
   JSONValue *toJsonVal(JSONFactory &factory) const override;
   void accept(RequestHandler &handler) const override;
@@ -561,7 +565,7 @@ struct UnknownRequest : public Request {
 
 struct debugger::DisableRequest : public Request {
   DisableRequest();
-  explicit DisableRequest(const JSONObject *obj);
+  static std::unique_ptr<DisableRequest> tryMake(const JSONObject *obj);
 
   JSONValue *toJsonVal(JSONFactory &factory) const override;
   void accept(RequestHandler &handler) const override;
@@ -569,7 +573,7 @@ struct debugger::DisableRequest : public Request {
 
 struct debugger::EnableRequest : public Request {
   EnableRequest();
-  explicit EnableRequest(const JSONObject *obj);
+  static std::unique_ptr<EnableRequest> tryMake(const JSONObject *obj);
 
   JSONValue *toJsonVal(JSONFactory &factory) const override;
   void accept(RequestHandler &handler) const override;
@@ -577,7 +581,8 @@ struct debugger::EnableRequest : public Request {
 
 struct debugger::EvaluateOnCallFrameRequest : public Request {
   EvaluateOnCallFrameRequest();
-  explicit EvaluateOnCallFrameRequest(const JSONObject *obj);
+  static std::unique_ptr<EvaluateOnCallFrameRequest> tryMake(
+      const JSONObject *obj);
 
   JSONValue *toJsonVal(JSONFactory &factory) const override;
   void accept(RequestHandler &handler) const override;
@@ -594,7 +599,7 @@ struct debugger::EvaluateOnCallFrameRequest : public Request {
 
 struct debugger::PauseRequest : public Request {
   PauseRequest();
-  explicit PauseRequest(const JSONObject *obj);
+  static std::unique_ptr<PauseRequest> tryMake(const JSONObject *obj);
 
   JSONValue *toJsonVal(JSONFactory &factory) const override;
   void accept(RequestHandler &handler) const override;
@@ -602,7 +607,8 @@ struct debugger::PauseRequest : public Request {
 
 struct debugger::RemoveBreakpointRequest : public Request {
   RemoveBreakpointRequest();
-  explicit RemoveBreakpointRequest(const JSONObject *obj);
+  static std::unique_ptr<RemoveBreakpointRequest> tryMake(
+      const JSONObject *obj);
 
   JSONValue *toJsonVal(JSONFactory &factory) const override;
   void accept(RequestHandler &handler) const override;
@@ -612,7 +618,7 @@ struct debugger::RemoveBreakpointRequest : public Request {
 
 struct debugger::ResumeRequest : public Request {
   ResumeRequest();
-  explicit ResumeRequest(const JSONObject *obj);
+  static std::unique_ptr<ResumeRequest> tryMake(const JSONObject *obj);
 
   JSONValue *toJsonVal(JSONFactory &factory) const override;
   void accept(RequestHandler &handler) const override;
@@ -622,7 +628,7 @@ struct debugger::ResumeRequest : public Request {
 
 struct debugger::SetBreakpointRequest : public Request {
   SetBreakpointRequest();
-  explicit SetBreakpointRequest(const JSONObject *obj);
+  static std::unique_ptr<SetBreakpointRequest> tryMake(const JSONObject *obj);
 
   JSONValue *toJsonVal(JSONFactory &factory) const override;
   void accept(RequestHandler &handler) const override;
@@ -633,22 +639,24 @@ struct debugger::SetBreakpointRequest : public Request {
 
 struct debugger::SetBreakpointByUrlRequest : public Request {
   SetBreakpointByUrlRequest();
-  explicit SetBreakpointByUrlRequest(const JSONObject *obj);
+  static std::unique_ptr<SetBreakpointByUrlRequest> tryMake(
+      const JSONObject *obj);
 
   JSONValue *toJsonVal(JSONFactory &factory) const override;
   void accept(RequestHandler &handler) const override;
 
-  int lineNumber{};
+  long long lineNumber{};
   std::optional<std::string> url;
   std::optional<std::string> urlRegex;
   std::optional<std::string> scriptHash;
-  std::optional<int> columnNumber;
+  std::optional<long long> columnNumber;
   std::optional<std::string> condition;
 };
 
 struct debugger::SetBreakpointsActiveRequest : public Request {
   SetBreakpointsActiveRequest();
-  explicit SetBreakpointsActiveRequest(const JSONObject *obj);
+  static std::unique_ptr<SetBreakpointsActiveRequest> tryMake(
+      const JSONObject *obj);
 
   JSONValue *toJsonVal(JSONFactory &factory) const override;
   void accept(RequestHandler &handler) const override;
@@ -658,7 +666,8 @@ struct debugger::SetBreakpointsActiveRequest : public Request {
 
 struct debugger::SetInstrumentationBreakpointRequest : public Request {
   SetInstrumentationBreakpointRequest();
-  explicit SetInstrumentationBreakpointRequest(const JSONObject *obj);
+  static std::unique_ptr<SetInstrumentationBreakpointRequest> tryMake(
+      const JSONObject *obj);
 
   JSONValue *toJsonVal(JSONFactory &factory) const override;
   void accept(RequestHandler &handler) const override;
@@ -668,7 +677,8 @@ struct debugger::SetInstrumentationBreakpointRequest : public Request {
 
 struct debugger::SetPauseOnExceptionsRequest : public Request {
   SetPauseOnExceptionsRequest();
-  explicit SetPauseOnExceptionsRequest(const JSONObject *obj);
+  static std::unique_ptr<SetPauseOnExceptionsRequest> tryMake(
+      const JSONObject *obj);
 
   JSONValue *toJsonVal(JSONFactory &factory) const override;
   void accept(RequestHandler &handler) const override;
@@ -678,7 +688,7 @@ struct debugger::SetPauseOnExceptionsRequest : public Request {
 
 struct debugger::StepIntoRequest : public Request {
   StepIntoRequest();
-  explicit StepIntoRequest(const JSONObject *obj);
+  static std::unique_ptr<StepIntoRequest> tryMake(const JSONObject *obj);
 
   JSONValue *toJsonVal(JSONFactory &factory) const override;
   void accept(RequestHandler &handler) const override;
@@ -686,7 +696,7 @@ struct debugger::StepIntoRequest : public Request {
 
 struct debugger::StepOutRequest : public Request {
   StepOutRequest();
-  explicit StepOutRequest(const JSONObject *obj);
+  static std::unique_ptr<StepOutRequest> tryMake(const JSONObject *obj);
 
   JSONValue *toJsonVal(JSONFactory &factory) const override;
   void accept(RequestHandler &handler) const override;
@@ -694,7 +704,7 @@ struct debugger::StepOutRequest : public Request {
 
 struct debugger::StepOverRequest : public Request {
   StepOverRequest();
-  explicit StepOverRequest(const JSONObject *obj);
+  static std::unique_ptr<StepOverRequest> tryMake(const JSONObject *obj);
 
   JSONValue *toJsonVal(JSONFactory &factory) const override;
   void accept(RequestHandler &handler) const override;
@@ -702,7 +712,7 @@ struct debugger::StepOverRequest : public Request {
 
 struct heapProfiler::CollectGarbageRequest : public Request {
   CollectGarbageRequest();
-  explicit CollectGarbageRequest(const JSONObject *obj);
+  static std::unique_ptr<CollectGarbageRequest> tryMake(const JSONObject *obj);
 
   JSONValue *toJsonVal(JSONFactory &factory) const override;
   void accept(RequestHandler &handler) const override;
@@ -710,7 +720,7 @@ struct heapProfiler::CollectGarbageRequest : public Request {
 
 struct heapProfiler::GetHeapObjectIdRequest : public Request {
   GetHeapObjectIdRequest();
-  explicit GetHeapObjectIdRequest(const JSONObject *obj);
+  static std::unique_ptr<GetHeapObjectIdRequest> tryMake(const JSONObject *obj);
 
   JSONValue *toJsonVal(JSONFactory &factory) const override;
   void accept(RequestHandler &handler) const override;
@@ -720,7 +730,8 @@ struct heapProfiler::GetHeapObjectIdRequest : public Request {
 
 struct heapProfiler::GetObjectByHeapObjectIdRequest : public Request {
   GetObjectByHeapObjectIdRequest();
-  explicit GetObjectByHeapObjectIdRequest(const JSONObject *obj);
+  static std::unique_ptr<GetObjectByHeapObjectIdRequest> tryMake(
+      const JSONObject *obj);
 
   JSONValue *toJsonVal(JSONFactory &factory) const override;
   void accept(RequestHandler &handler) const override;
@@ -731,7 +742,7 @@ struct heapProfiler::GetObjectByHeapObjectIdRequest : public Request {
 
 struct heapProfiler::StartSamplingRequest : public Request {
   StartSamplingRequest();
-  explicit StartSamplingRequest(const JSONObject *obj);
+  static std::unique_ptr<StartSamplingRequest> tryMake(const JSONObject *obj);
 
   JSONValue *toJsonVal(JSONFactory &factory) const override;
   void accept(RequestHandler &handler) const override;
@@ -743,7 +754,8 @@ struct heapProfiler::StartSamplingRequest : public Request {
 
 struct heapProfiler::StartTrackingHeapObjectsRequest : public Request {
   StartTrackingHeapObjectsRequest();
-  explicit StartTrackingHeapObjectsRequest(const JSONObject *obj);
+  static std::unique_ptr<StartTrackingHeapObjectsRequest> tryMake(
+      const JSONObject *obj);
 
   JSONValue *toJsonVal(JSONFactory &factory) const override;
   void accept(RequestHandler &handler) const override;
@@ -753,7 +765,7 @@ struct heapProfiler::StartTrackingHeapObjectsRequest : public Request {
 
 struct heapProfiler::StopSamplingRequest : public Request {
   StopSamplingRequest();
-  explicit StopSamplingRequest(const JSONObject *obj);
+  static std::unique_ptr<StopSamplingRequest> tryMake(const JSONObject *obj);
 
   JSONValue *toJsonVal(JSONFactory &factory) const override;
   void accept(RequestHandler &handler) const override;
@@ -761,7 +773,8 @@ struct heapProfiler::StopSamplingRequest : public Request {
 
 struct heapProfiler::StopTrackingHeapObjectsRequest : public Request {
   StopTrackingHeapObjectsRequest();
-  explicit StopTrackingHeapObjectsRequest(const JSONObject *obj);
+  static std::unique_ptr<StopTrackingHeapObjectsRequest> tryMake(
+      const JSONObject *obj);
 
   JSONValue *toJsonVal(JSONFactory &factory) const override;
   void accept(RequestHandler &handler) const override;
@@ -773,7 +786,8 @@ struct heapProfiler::StopTrackingHeapObjectsRequest : public Request {
 
 struct heapProfiler::TakeHeapSnapshotRequest : public Request {
   TakeHeapSnapshotRequest();
-  explicit TakeHeapSnapshotRequest(const JSONObject *obj);
+  static std::unique_ptr<TakeHeapSnapshotRequest> tryMake(
+      const JSONObject *obj);
 
   JSONValue *toJsonVal(JSONFactory &factory) const override;
   void accept(RequestHandler &handler) const override;
@@ -785,7 +799,7 @@ struct heapProfiler::TakeHeapSnapshotRequest : public Request {
 
 struct profiler::StartRequest : public Request {
   StartRequest();
-  explicit StartRequest(const JSONObject *obj);
+  static std::unique_ptr<StartRequest> tryMake(const JSONObject *obj);
 
   JSONValue *toJsonVal(JSONFactory &factory) const override;
   void accept(RequestHandler &handler) const override;
@@ -793,7 +807,7 @@ struct profiler::StartRequest : public Request {
 
 struct profiler::StopRequest : public Request {
   StopRequest();
-  explicit StopRequest(const JSONObject *obj);
+  static std::unique_ptr<StopRequest> tryMake(const JSONObject *obj);
 
   JSONValue *toJsonVal(JSONFactory &factory) const override;
   void accept(RequestHandler &handler) const override;
@@ -801,7 +815,7 @@ struct profiler::StopRequest : public Request {
 
 struct runtime::CallFunctionOnRequest : public Request {
   CallFunctionOnRequest();
-  explicit CallFunctionOnRequest(const JSONObject *obj);
+  static std::unique_ptr<CallFunctionOnRequest> tryMake(const JSONObject *obj);
 
   JSONValue *toJsonVal(JSONFactory &factory) const override;
   void accept(RequestHandler &handler) const override;
@@ -820,7 +834,7 @@ struct runtime::CallFunctionOnRequest : public Request {
 
 struct runtime::CompileScriptRequest : public Request {
   CompileScriptRequest();
-  explicit CompileScriptRequest(const JSONObject *obj);
+  static std::unique_ptr<CompileScriptRequest> tryMake(const JSONObject *obj);
 
   JSONValue *toJsonVal(JSONFactory &factory) const override;
   void accept(RequestHandler &handler) const override;
@@ -833,7 +847,7 @@ struct runtime::CompileScriptRequest : public Request {
 
 struct runtime::DisableRequest : public Request {
   DisableRequest();
-  explicit DisableRequest(const JSONObject *obj);
+  static std::unique_ptr<DisableRequest> tryMake(const JSONObject *obj);
 
   JSONValue *toJsonVal(JSONFactory &factory) const override;
   void accept(RequestHandler &handler) const override;
@@ -841,7 +855,7 @@ struct runtime::DisableRequest : public Request {
 
 struct runtime::EnableRequest : public Request {
   EnableRequest();
-  explicit EnableRequest(const JSONObject *obj);
+  static std::unique_ptr<EnableRequest> tryMake(const JSONObject *obj);
 
   JSONValue *toJsonVal(JSONFactory &factory) const override;
   void accept(RequestHandler &handler) const override;
@@ -849,7 +863,7 @@ struct runtime::EnableRequest : public Request {
 
 struct runtime::EvaluateRequest : public Request {
   EvaluateRequest();
-  explicit EvaluateRequest(const JSONObject *obj);
+  static std::unique_ptr<EvaluateRequest> tryMake(const JSONObject *obj);
 
   JSONValue *toJsonVal(JSONFactory &factory) const override;
   void accept(RequestHandler &handler) const override;
@@ -867,7 +881,7 @@ struct runtime::EvaluateRequest : public Request {
 
 struct runtime::GetHeapUsageRequest : public Request {
   GetHeapUsageRequest();
-  explicit GetHeapUsageRequest(const JSONObject *obj);
+  static std::unique_ptr<GetHeapUsageRequest> tryMake(const JSONObject *obj);
 
   JSONValue *toJsonVal(JSONFactory &factory) const override;
   void accept(RequestHandler &handler) const override;
@@ -875,7 +889,7 @@ struct runtime::GetHeapUsageRequest : public Request {
 
 struct runtime::GetPropertiesRequest : public Request {
   GetPropertiesRequest();
-  explicit GetPropertiesRequest(const JSONObject *obj);
+  static std::unique_ptr<GetPropertiesRequest> tryMake(const JSONObject *obj);
 
   JSONValue *toJsonVal(JSONFactory &factory) const override;
   void accept(RequestHandler &handler) const override;
@@ -887,7 +901,8 @@ struct runtime::GetPropertiesRequest : public Request {
 
 struct runtime::GlobalLexicalScopeNamesRequest : public Request {
   GlobalLexicalScopeNamesRequest();
-  explicit GlobalLexicalScopeNamesRequest(const JSONObject *obj);
+  static std::unique_ptr<GlobalLexicalScopeNamesRequest> tryMake(
+      const JSONObject *obj);
 
   JSONValue *toJsonVal(JSONFactory &factory) const override;
   void accept(RequestHandler &handler) const override;
@@ -897,7 +912,8 @@ struct runtime::GlobalLexicalScopeNamesRequest : public Request {
 
 struct runtime::RunIfWaitingForDebuggerRequest : public Request {
   RunIfWaitingForDebuggerRequest();
-  explicit RunIfWaitingForDebuggerRequest(const JSONObject *obj);
+  static std::unique_ptr<RunIfWaitingForDebuggerRequest> tryMake(
+      const JSONObject *obj);
 
   JSONValue *toJsonVal(JSONFactory &factory) const override;
   void accept(RequestHandler &handler) const override;
@@ -906,23 +922,24 @@ struct runtime::RunIfWaitingForDebuggerRequest : public Request {
 /// Responses
 struct ErrorResponse : public Response {
   ErrorResponse() = default;
-  explicit ErrorResponse(const JSONObject *obj);
+  static std::unique_ptr<ErrorResponse> tryMake(const JSONObject *obj);
   JSONValue *toJsonVal(JSONFactory &factory) const override;
 
-  int code;
+  long long code;
   std::string message;
   std::optional<JSONBlob> data;
 };
 
 struct OkResponse : public Response {
   OkResponse() = default;
-  explicit OkResponse(const JSONObject *obj);
+  static std::unique_ptr<OkResponse> tryMake(const JSONObject *obj);
   JSONValue *toJsonVal(JSONFactory &factory) const override;
 };
 
 struct debugger::EvaluateOnCallFrameResponse : public Response {
   EvaluateOnCallFrameResponse() = default;
-  explicit EvaluateOnCallFrameResponse(const JSONObject *obj);
+  static std::unique_ptr<EvaluateOnCallFrameResponse> tryMake(
+      const JSONObject *obj);
   JSONValue *toJsonVal(JSONFactory &factory) const override;
 
   runtime::RemoteObject result{};
@@ -931,7 +948,7 @@ struct debugger::EvaluateOnCallFrameResponse : public Response {
 
 struct debugger::SetBreakpointResponse : public Response {
   SetBreakpointResponse() = default;
-  explicit SetBreakpointResponse(const JSONObject *obj);
+  static std::unique_ptr<SetBreakpointResponse> tryMake(const JSONObject *obj);
   JSONValue *toJsonVal(JSONFactory &factory) const override;
 
   debugger::BreakpointId breakpointId{};
@@ -940,7 +957,8 @@ struct debugger::SetBreakpointResponse : public Response {
 
 struct debugger::SetBreakpointByUrlResponse : public Response {
   SetBreakpointByUrlResponse() = default;
-  explicit SetBreakpointByUrlResponse(const JSONObject *obj);
+  static std::unique_ptr<SetBreakpointByUrlResponse> tryMake(
+      const JSONObject *obj);
   JSONValue *toJsonVal(JSONFactory &factory) const override;
 
   debugger::BreakpointId breakpointId{};
@@ -949,7 +967,8 @@ struct debugger::SetBreakpointByUrlResponse : public Response {
 
 struct debugger::SetInstrumentationBreakpointResponse : public Response {
   SetInstrumentationBreakpointResponse() = default;
-  explicit SetInstrumentationBreakpointResponse(const JSONObject *obj);
+  static std::unique_ptr<SetInstrumentationBreakpointResponse> tryMake(
+      const JSONObject *obj);
   JSONValue *toJsonVal(JSONFactory &factory) const override;
 
   debugger::BreakpointId breakpointId{};
@@ -957,7 +976,8 @@ struct debugger::SetInstrumentationBreakpointResponse : public Response {
 
 struct heapProfiler::GetHeapObjectIdResponse : public Response {
   GetHeapObjectIdResponse() = default;
-  explicit GetHeapObjectIdResponse(const JSONObject *obj);
+  static std::unique_ptr<GetHeapObjectIdResponse> tryMake(
+      const JSONObject *obj);
   JSONValue *toJsonVal(JSONFactory &factory) const override;
 
   heapProfiler::HeapSnapshotObjectId heapSnapshotObjectId{};
@@ -965,7 +985,8 @@ struct heapProfiler::GetHeapObjectIdResponse : public Response {
 
 struct heapProfiler::GetObjectByHeapObjectIdResponse : public Response {
   GetObjectByHeapObjectIdResponse() = default;
-  explicit GetObjectByHeapObjectIdResponse(const JSONObject *obj);
+  static std::unique_ptr<GetObjectByHeapObjectIdResponse> tryMake(
+      const JSONObject *obj);
   JSONValue *toJsonVal(JSONFactory &factory) const override;
 
   runtime::RemoteObject result{};
@@ -973,7 +994,7 @@ struct heapProfiler::GetObjectByHeapObjectIdResponse : public Response {
 
 struct heapProfiler::StopSamplingResponse : public Response {
   StopSamplingResponse() = default;
-  explicit StopSamplingResponse(const JSONObject *obj);
+  static std::unique_ptr<StopSamplingResponse> tryMake(const JSONObject *obj);
   JSONValue *toJsonVal(JSONFactory &factory) const override;
 
   heapProfiler::SamplingHeapProfile profile{};
@@ -981,7 +1002,7 @@ struct heapProfiler::StopSamplingResponse : public Response {
 
 struct profiler::StopResponse : public Response {
   StopResponse() = default;
-  explicit StopResponse(const JSONObject *obj);
+  static std::unique_ptr<StopResponse> tryMake(const JSONObject *obj);
   JSONValue *toJsonVal(JSONFactory &factory) const override;
 
   profiler::Profile profile{};
@@ -989,7 +1010,7 @@ struct profiler::StopResponse : public Response {
 
 struct runtime::CallFunctionOnResponse : public Response {
   CallFunctionOnResponse() = default;
-  explicit CallFunctionOnResponse(const JSONObject *obj);
+  static std::unique_ptr<CallFunctionOnResponse> tryMake(const JSONObject *obj);
   JSONValue *toJsonVal(JSONFactory &factory) const override;
 
   runtime::RemoteObject result{};
@@ -998,7 +1019,7 @@ struct runtime::CallFunctionOnResponse : public Response {
 
 struct runtime::CompileScriptResponse : public Response {
   CompileScriptResponse() = default;
-  explicit CompileScriptResponse(const JSONObject *obj);
+  static std::unique_ptr<CompileScriptResponse> tryMake(const JSONObject *obj);
   JSONValue *toJsonVal(JSONFactory &factory) const override;
 
   std::optional<runtime::ScriptId> scriptId;
@@ -1007,7 +1028,7 @@ struct runtime::CompileScriptResponse : public Response {
 
 struct runtime::EvaluateResponse : public Response {
   EvaluateResponse() = default;
-  explicit EvaluateResponse(const JSONObject *obj);
+  static std::unique_ptr<EvaluateResponse> tryMake(const JSONObject *obj);
   JSONValue *toJsonVal(JSONFactory &factory) const override;
 
   runtime::RemoteObject result{};
@@ -1016,7 +1037,7 @@ struct runtime::EvaluateResponse : public Response {
 
 struct runtime::GetHeapUsageResponse : public Response {
   GetHeapUsageResponse() = default;
-  explicit GetHeapUsageResponse(const JSONObject *obj);
+  static std::unique_ptr<GetHeapUsageResponse> tryMake(const JSONObject *obj);
   JSONValue *toJsonVal(JSONFactory &factory) const override;
 
   double usedSize{};
@@ -1025,7 +1046,7 @@ struct runtime::GetHeapUsageResponse : public Response {
 
 struct runtime::GetPropertiesResponse : public Response {
   GetPropertiesResponse() = default;
-  explicit GetPropertiesResponse(const JSONObject *obj);
+  static std::unique_ptr<GetPropertiesResponse> tryMake(const JSONObject *obj);
   JSONValue *toJsonVal(JSONFactory &factory) const override;
 
   std::vector<runtime::PropertyDescriptor> result;
@@ -1036,7 +1057,8 @@ struct runtime::GetPropertiesResponse : public Response {
 
 struct runtime::GlobalLexicalScopeNamesResponse : public Response {
   GlobalLexicalScopeNamesResponse() = default;
-  explicit GlobalLexicalScopeNamesResponse(const JSONObject *obj);
+  static std::unique_ptr<GlobalLexicalScopeNamesResponse> tryMake(
+      const JSONObject *obj);
   JSONValue *toJsonVal(JSONFactory &factory) const override;
 
   std::vector<std::string> names;
@@ -1045,7 +1067,8 @@ struct runtime::GlobalLexicalScopeNamesResponse : public Response {
 /// Notifications
 struct debugger::BreakpointResolvedNotification : public Notification {
   BreakpointResolvedNotification();
-  explicit BreakpointResolvedNotification(const JSONObject *obj);
+  static std::unique_ptr<BreakpointResolvedNotification> tryMake(
+      const JSONObject *obj);
   JSONValue *toJsonVal(JSONFactory &factory) const override;
 
   debugger::BreakpointId breakpointId{};
@@ -1054,7 +1077,7 @@ struct debugger::BreakpointResolvedNotification : public Notification {
 
 struct debugger::PausedNotification : public Notification {
   PausedNotification();
-  explicit PausedNotification(const JSONObject *obj);
+  static std::unique_ptr<PausedNotification> tryMake(const JSONObject *obj);
   JSONValue *toJsonVal(JSONFactory &factory) const override;
 
   std::vector<debugger::CallFrame> callFrames;
@@ -1066,33 +1089,35 @@ struct debugger::PausedNotification : public Notification {
 
 struct debugger::ResumedNotification : public Notification {
   ResumedNotification();
-  explicit ResumedNotification(const JSONObject *obj);
+  static std::unique_ptr<ResumedNotification> tryMake(const JSONObject *obj);
   JSONValue *toJsonVal(JSONFactory &factory) const override;
 };
 
 struct debugger::ScriptParsedNotification : public Notification {
   ScriptParsedNotification();
-  explicit ScriptParsedNotification(const JSONObject *obj);
+  static std::unique_ptr<ScriptParsedNotification> tryMake(
+      const JSONObject *obj);
   JSONValue *toJsonVal(JSONFactory &factory) const override;
 
   runtime::ScriptId scriptId{};
   std::string url;
-  int startLine{};
-  int startColumn{};
-  int endLine{};
-  int endColumn{};
+  long long startLine{};
+  long long startColumn{};
+  long long endLine{};
+  long long endColumn{};
   runtime::ExecutionContextId executionContextId{};
   std::string hash;
   std::optional<JSONBlob> executionContextAuxData;
   std::optional<std::string> sourceMapURL;
   std::optional<bool> hasSourceURL;
   std::optional<bool> isModule;
-  std::optional<int> length;
+  std::optional<long long> length;
 };
 
 struct heapProfiler::AddHeapSnapshotChunkNotification : public Notification {
   AddHeapSnapshotChunkNotification();
-  explicit AddHeapSnapshotChunkNotification(const JSONObject *obj);
+  static std::unique_ptr<AddHeapSnapshotChunkNotification> tryMake(
+      const JSONObject *obj);
   JSONValue *toJsonVal(JSONFactory &factory) const override;
 
   std::string chunk;
@@ -1100,35 +1125,39 @@ struct heapProfiler::AddHeapSnapshotChunkNotification : public Notification {
 
 struct heapProfiler::HeapStatsUpdateNotification : public Notification {
   HeapStatsUpdateNotification();
-  explicit HeapStatsUpdateNotification(const JSONObject *obj);
+  static std::unique_ptr<HeapStatsUpdateNotification> tryMake(
+      const JSONObject *obj);
   JSONValue *toJsonVal(JSONFactory &factory) const override;
 
-  std::vector<int> statsUpdate;
+  std::vector<long long> statsUpdate;
 };
 
 struct heapProfiler::LastSeenObjectIdNotification : public Notification {
   LastSeenObjectIdNotification();
-  explicit LastSeenObjectIdNotification(const JSONObject *obj);
+  static std::unique_ptr<LastSeenObjectIdNotification> tryMake(
+      const JSONObject *obj);
   JSONValue *toJsonVal(JSONFactory &factory) const override;
 
-  int lastSeenObjectId{};
+  long long lastSeenObjectId{};
   double timestamp{};
 };
 
 struct heapProfiler::ReportHeapSnapshotProgressNotification
     : public Notification {
   ReportHeapSnapshotProgressNotification();
-  explicit ReportHeapSnapshotProgressNotification(const JSONObject *obj);
+  static std::unique_ptr<ReportHeapSnapshotProgressNotification> tryMake(
+      const JSONObject *obj);
   JSONValue *toJsonVal(JSONFactory &factory) const override;
 
-  int done{};
-  int total{};
+  long long done{};
+  long long total{};
   std::optional<bool> finished;
 };
 
 struct runtime::ConsoleAPICalledNotification : public Notification {
   ConsoleAPICalledNotification();
-  explicit ConsoleAPICalledNotification(const JSONObject *obj);
+  static std::unique_ptr<ConsoleAPICalledNotification> tryMake(
+      const JSONObject *obj);
   JSONValue *toJsonVal(JSONFactory &factory) const override;
 
   std::string type;
@@ -1140,7 +1169,8 @@ struct runtime::ConsoleAPICalledNotification : public Notification {
 
 struct runtime::ExecutionContextCreatedNotification : public Notification {
   ExecutionContextCreatedNotification();
-  explicit ExecutionContextCreatedNotification(const JSONObject *obj);
+  static std::unique_ptr<ExecutionContextCreatedNotification> tryMake(
+      const JSONObject *obj);
   JSONValue *toJsonVal(JSONFactory &factory) const override;
 
   runtime::ExecutionContextDescription context{};

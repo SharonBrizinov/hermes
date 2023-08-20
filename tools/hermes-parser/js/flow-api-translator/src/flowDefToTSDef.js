@@ -657,7 +657,13 @@ const getTransforms = (
       case 'VoidTypeAnnotation':
         return transform.VoidTypeAnnotation(node);
       case 'TypePredicate':
-        return unsupportedAnnotation(node, node.type);
+        return transform.TypePredicateAnnotation(node);
+      case 'ConditionalTypeAnnotation':
+        return transform.ConditionalTypeAnnotation(node);
+      case 'InferTypeAnnotation':
+        return transform.InferTypeAnnotation(node);
+      case 'KeyofTypeAnnotation':
+        return transform.KeyofTypeAnnotation(node);
       default:
         throw unexpectedTranslationError(node, `Unhandled type ${node.type}`);
     }
@@ -1757,6 +1763,34 @@ const getTransforms = (
           };
         }
 
+        case '$ReadOnlyMap': {
+          return {
+            type: 'TSTypeReference',
+            typeName: {
+              type: 'Identifier',
+              name: 'ReadonlyMap',
+            },
+            typeParameters: {
+              type: 'TSTypeParameterInstantiation',
+              params: assertHasExactlyNTypeParameters(1),
+            },
+          };
+        }
+
+        case '$ReadOnlySet': {
+          return {
+            type: 'TSTypeReference',
+            typeName: {
+              type: 'Identifier',
+              name: 'ReadonlySet',
+            },
+            typeParameters: {
+              type: 'TSTypeParameterInstantiation',
+              params: assertHasExactlyNTypeParameters(1),
+            },
+          };
+        }
+
         case '$Values': {
           // `$Values<T>` => `T[keyof T]`
           const transformedType = assertHasExactlyNTypeParameters(1)[0];
@@ -2492,7 +2526,36 @@ const getTransforms = (
     ):
       | TSESTree.TSTypeLiteral
       | TSESTree.TSIntersectionType
-      | TSESTree.TSAnyKeyword {
+      | TSESTree.TSAnyKeyword
+      | TSESTree.TSMappedType {
+      if (
+        node.properties.length === 1 &&
+        node.properties[0].type === 'ObjectTypeMappedTypeProperty'
+      ) {
+        // Mapped Object Object types must not have other object properties.
+        const prop: FlowESTree.ObjectTypeMappedTypeProperty =
+          node.properties[0];
+        const tsProp: TSESTree.TSMappedType = {
+          type: 'TSMappedType',
+          typeParameter: {
+            type: 'TSTypeParameter',
+            name: {
+              type: 'Identifier',
+              name: prop.keyTparam.name,
+            },
+            constraint: transformTypeAnnotationType(prop.sourceType),
+            in: false,
+            out: false,
+          },
+          readonly: prop.variance?.kind === 'plus',
+          optional: prop.optional === 'Optional',
+          typeAnnotation: transformTypeAnnotationType(prop.propType),
+          nameType: null,
+        };
+
+        return tsProp;
+      }
+
       // we want to preserve the source order of the members
       // unfortunately flow has unordered properties storing things
       // so store all elements with their start index and sort the
@@ -2531,10 +2594,9 @@ const getTransforms = (
           }
 
           if (property.type === 'ObjectTypeMappedTypeProperty') {
-            // TODO - Support mapped types
             return unsupportedAnnotation(
               property,
-              'object type with mapped type property',
+              'object type with mapped type property along with other properties',
             );
           }
 
@@ -3061,6 +3123,47 @@ const getTransforms = (
     ): TSESTree.TSVoidKeyword {
       return {
         type: 'TSVoidKeyword',
+      };
+    },
+    ConditionalTypeAnnotation(
+      node: FlowESTree.ConditionalTypeAnnotation,
+    ): TSESTree.TSConditionalType {
+      return {
+        type: 'TSConditionalType',
+        checkType: transformTypeAnnotationType(node.checkType),
+        extendsType: transformTypeAnnotationType(node.extendsType),
+        trueType: transformTypeAnnotationType(node.trueType),
+        falseType: transformTypeAnnotationType(node.falseType),
+      };
+    },
+    TypePredicateAnnotation(
+      node: FlowESTree.TypePredicate,
+    ): TSESTree.TSTypePredicate {
+      return {
+        type: 'TSTypePredicate',
+        asserts: node.asserts,
+        parameterName: transform.Identifier(node.parameterName, false),
+        typeAnnotation: node.typeAnnotation && {
+          type: 'TSTypeAnnotation',
+          typeAnnotation: transformTypeAnnotationType(node.typeAnnotation),
+        },
+      };
+    },
+    InferTypeAnnotation(
+      node: FlowESTree.InferTypeAnnotation,
+    ): TSESTree.TSInferType {
+      return {
+        type: 'TSInferType',
+        typeParameter: transform.TypeParameter(node.typeParameter),
+      };
+    },
+    KeyofTypeAnnotation(
+      node: FlowESTree.KeyofTypeAnnotation,
+    ): TSESTree.TSTypeOperator {
+      return {
+        type: 'TSTypeOperator',
+        operator: 'keyof',
+        typeAnnotation: transformTypeAnnotationType(node.argument),
       };
     },
   };

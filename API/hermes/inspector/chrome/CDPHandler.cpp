@@ -20,13 +20,13 @@
 #include <unordered_set>
 
 #include <hermes/DebuggerAPI.h>
-#include <hermes/Parser/JSONParser.h>
 #include <hermes/hermes.h>
 #include <hermes/inspector/AsyncPauseState.h>
 #include <hermes/inspector/Exceptions.h>
 #include <hermes/inspector/RuntimeAdapter.h>
 #include <hermes/inspector/chrome/CallbackOStream.h>
 #include <hermes/inspector/chrome/MessageConverters.h>
+#include <hermes/inspector/chrome/RemoteObjectConverters.h>
 #include <hermes/inspector/chrome/RemoteObjectsTable.h>
 #include <jsi/instrumentation.h>
 
@@ -345,7 +345,7 @@ class CDPHandler::Impl : public message::RequestHandler,
   bool awaitingDebuggerOnStart_;
   std::condition_variable signal_;
   struct PendingEvalReq {
-    int id;
+    long long id;
     uint32_t frameIdx;
     std::string expression;
     std::optional<std::string> objectGroup;
@@ -430,27 +430,21 @@ static bool isDebuggerRequest(const m::Request &req) {
 }
 
 void CDPHandler::Impl::sendMessage(std::string str) {
-  m::Request::ParseResult maybeReq = m::Request::fromJson(str);
-
-  // If parsing failed, then the value of ParseResult will be a string
-  // containing the error message. Silently log this error message.
-  if (std::holds_alternative<std::string>(maybeReq)) {
+  std::unique_ptr<m::Request> req = m::Request::fromJson(str);
+  if (!req) {
     return;
   }
 
-  auto &req = std::get<std::unique_ptr<m::Request>>(maybeReq);
-  if (req) {
-    // If the debugger is currently disabled and the incoming method is for
-    // the debugger, then error out to the request immediately here. We make
-    // an exception for Debugger.enable though, otherwise we would never be
-    // able to turn the debugger back on once it's disabled.
-    if (isDebuggerDisabled() && isDebuggerRequest(*req) &&
-        (req->method != kDebuggerEnableMethod)) {
-      sendResponseToClient(m::makeErrorResponse(
-          req->id, m::ErrorCode::ServerError, "Debugger agent is not enabled"));
-    } else {
-      req->accept(*this);
-    }
+  // If the debugger is currently disabled and the incoming method is for
+  // the debugger, then error out to the request immediately here. We make
+  // an exception for Debugger.enable though, otherwise we would never be
+  // able to turn the debugger back on once it's disabled.
+  if (isDebuggerDisabled() && isDebuggerRequest(*req) &&
+      (req->method != kDebuggerEnableMethod)) {
+    sendResponseToClient(m::makeErrorResponse(
+        req->id, m::ErrorCode::ServerError, "Debugger agent is not enabled"));
+  } else {
+    req->accept(*this);
   }
 }
 
@@ -668,18 +662,14 @@ void CDPHandler::Impl::handle(const m::heapProfiler::StopSamplingRequest &req) {
   enqueueFunc([this, req]() {
     std::ostringstream stream;
     getRuntime().instrumentation().stopHeapSampling(stream);
-    // We are fine with this JSONObject becoming invalid after this function
-    // exits, so we declare a local factory.
-    JSLexer::Allocator alloc;
-    JSONFactory factory(alloc);
-    std::optional<JSONObject *> json = parseStrAsJsonObj(stream.str(), factory);
-    if (!json) {
-      throw std::runtime_error("Failed to parse string as JSONObject");
-    }
+
     m::heapProfiler::StopSamplingResponse resp;
-    m::heapProfiler::SamplingHeapProfile profile{*json};
+    auto profile = m::heapProfiler::makeSamplingHeapProfile(stream.str());
+    if (profile == nullptr) {
+      throw std::runtime_error("Failed to make SamplingHeapProfile");
+    }
     resp.id = req.id;
-    resp.profile = std::move(profile);
+    resp.profile = std::move(*profile);
     sendResponseToClient(resp);
   });
 }
@@ -767,18 +757,11 @@ void CDPHandler::Impl::handle(const m::profiler::StopRequest &req) {
     try {
       m::profiler::StopResponse resp;
       resp.id = req.id;
-      // parseJson throws on errors, so make sure we don't crash the app
-      // if somehow the sampling profiler output is borked.
-      // We are fine with resp.profile becoming invalid after this function
-      // exits, so we declare a local factory.
-      JSLexer::Allocator alloc;
-      JSONFactory factory(alloc);
-      std::optional<JSONObject *> json =
-          parseStrAsJsonObj(std::move(profileStream).str(), factory);
-      if (!json) {
-        throw std::runtime_error("Failed to parse string as JSONObject");
+      auto profile = m::profiler::makeProfile(std::move(profileStream).str());
+      if (profile == nullptr) {
+        throw std::runtime_error("Failed to make Profile");
       }
-      resp.profile = m::profiler::Profile{*json};
+      resp.profile = std::move(*profile);
       sendResponseToClient(resp);
     } catch (const std::exception &) {
       sendResponseToClient(m::makeErrorResponse(
