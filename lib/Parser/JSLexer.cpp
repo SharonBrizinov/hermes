@@ -428,6 +428,7 @@ const Token *JSLexer::advance(GrammarContext grammarContext) {
           scanLineComment(curCharPtr_);
           continue;
         }
+        token_.setStart(curCharPtr_);
         if (!scanPrivateIdentifier()) {
           continue;
         }
@@ -1708,7 +1709,17 @@ void JSLexer::scanIdentifierFastPath(const char *start) {
 template <JSLexer::IdentifierMode Mode>
 void JSLexer::scanIdentifierParts() {
   consumeIdentifierParts<Mode>();
-  token_.setIdentifier(getIdentifier(tmpStorage_.str()));
+  auto rw =
+      scanReservedWord(tmpStorage_.str().begin(), tmpStorage_.str().size());
+  if (rw != TokenKind::identifier) {
+    token_.setResWord(rw, resWordIdent(rw));
+    sm_.warning(
+        {token_.getStartLoc(), SMLoc::getFromPointer(curCharPtr_)},
+        "scanning identifier with unicode escape as reserved word",
+        Subsystem::Lexer);
+  } else {
+    token_.setIdentifier(getIdentifier(tmpStorage_.str()));
+  }
 }
 
 bool JSLexer::scanPrivateIdentifier() {
@@ -1729,9 +1740,6 @@ bool JSLexer::scanPrivateIdentifier() {
     return false;
   }
 
-  // Reset the start to the '#' because the scanIdentifier functions were
-  // not aware of the true start of the token.
-  token_.setStart(start);
   // Parsed a resword or identifier.
   // Convert the TokenKind to private_identifier after the fact.
   // This avoids adding another Mode to IdentifierMode.
