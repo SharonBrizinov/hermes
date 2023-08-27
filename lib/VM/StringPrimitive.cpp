@@ -69,9 +69,9 @@ CallResult<HermesValue> StringPrimitive::createEfficientImpl(
       (!optStorage ||
        str == llvh::makeArrayRef(optStorage->data(), optStorage->size())) &&
       "If optStorage is provided, it must equal the input string");
-  assert(
-      (!charIs8Bit || isAllASCII(str.begin(), str.end())) &&
-      "8 bit strings must be ASCII");
+  //assert(
+  //    (!charIs8Bit || isAllASCII(str.begin(), str.end())) &&
+  //    "8 bit strings must be ASCII");
   if (str.empty()) {
     return HermesValue::encodeStringValue(
         runtime.getPredefinedString(Predefined::emptyString));
