@@ -771,6 +771,9 @@ function deserializeAssignmentPattern() {
 function deserializePatternLast() {
   throw new Error('Pattern' + ' should not appear in program buffer');
 }
+function deserializeJSXFirst() {
+  throw new Error('JSX' + ' should not appear in program buffer');
+}
 function deserializeJSXIdentifier() {
   return {
     type: 'JSXIdentifier',
@@ -883,6 +886,12 @@ function deserializeJSXOpeningFragment() {
 }
 function deserializeJSXClosingFragment() {
   return {type: 'JSXClosingFragment', loc: this.addEmptyLoc()};
+}
+function deserializeJSXLast() {
+  throw new Error('JSX' + ' should not appear in program buffer');
+}
+function deserializeFlowFirst() {
+  throw new Error('Flow' + ' should not appear in program buffer');
 }
 function deserializeExistsTypeAnnotation() {
   return {type: 'ExistsTypeAnnotation', loc: this.addEmptyLoc()};
@@ -1014,6 +1023,14 @@ function deserializeKeyofTypeAnnotation() {
     type: 'KeyofTypeAnnotation',
     loc: this.addEmptyLoc(),
     argument: this.deserializeNode(),
+  };
+}
+function deserializeTypeOperator() {
+  return {
+    type: 'TypeOperator',
+    loc: this.addEmptyLoc(),
+    operator: this.deserializeString(),
+    typeAnnotation: this.deserializeNode(),
   };
 }
 function deserializeQualifiedTypeofIdentifier() {
@@ -1498,6 +1515,12 @@ function deserializeComponentParameter() {
     shorthand: this.deserializeBoolean(),
   };
 }
+function deserializeFlowLast() {
+  throw new Error('Flow' + ' should not appear in program buffer');
+}
+function deserializeTSFirst() {
+  throw new Error('TS' + ' should not appear in program buffer');
+}
 function deserializeTSTypeAnnotation() {
   return {
     type: 'TSTypeAnnotation',
@@ -1806,6 +1829,9 @@ function deserializeTSModifiers() {
     readonly: this.deserializeBoolean(),
   };
 }
+function deserializeTSLast() {
+  throw new Error('TS' + ' should not appear in program buffer');
+}
 function deserializeCoverFirst() {
   throw new Error('Cover' + ' should not appear in program buffer');
 }
@@ -1952,6 +1978,7 @@ module.exports = [
   deserializeRestElement,
   deserializeAssignmentPattern,
   deserializePatternLast,
+  deserializeJSXFirst,
   deserializeJSXIdentifier,
   deserializeJSXMemberExpression,
   deserializeJSXNamespacedName,
@@ -1969,6 +1996,8 @@ module.exports = [
   deserializeJSXFragment,
   deserializeJSXOpeningFragment,
   deserializeJSXClosingFragment,
+  deserializeJSXLast,
+  deserializeFlowFirst,
   deserializeExistsTypeAnnotation,
   deserializeEmptyTypeAnnotation,
   deserializeStringTypeAnnotation,
@@ -1992,6 +2021,7 @@ module.exports = [
   deserializeQualifiedTypeIdentifier,
   deserializeTypeofTypeAnnotation,
   deserializeKeyofTypeAnnotation,
+  deserializeTypeOperator,
   deserializeQualifiedTypeofIdentifier,
   deserializeTupleTypeAnnotation,
   deserializeTupleTypeSpreadElement,
@@ -2049,6 +2079,8 @@ module.exports = [
   deserializeEnumNumberMember,
   deserializeEnumBooleanMember,
   deserializeComponentParameter,
+  deserializeFlowLast,
+  deserializeTSFirst,
   deserializeTSTypeAnnotation,
   deserializeTSAnyKeyword,
   deserializeTSNumberKeyword,
@@ -2091,6 +2123,7 @@ module.exports = [
   deserializeTSIndexSignature,
   deserializeTSCallSignatureDeclaration,
   deserializeTSModifiers,
+  deserializeTSLast,
   deserializeCoverFirst,
   deserializeCoverEmptyArgs,
   deserializeCoverTrailingComma,

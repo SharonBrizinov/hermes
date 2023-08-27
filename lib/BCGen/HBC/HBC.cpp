@@ -74,7 +74,7 @@ void lowerIR(Module *M, const BytecodeGenerationOptions &options) {
   PM.addPass<DedupReifyArguments>();
   PM.addPass<LowerSwitchIntoJumpTables>();
   PM.addPass<SwitchLowering>();
-  PM.addPass<LoadConstants>(options.optimizationEnabled);
+  PM.addPass<LoadConstants>();
   PM.addPass<LoadParameters>();
   if (options.optimizationEnabled) {
     // Lowers AllocObjects and its sequential literal properties into a single
@@ -586,7 +586,7 @@ std::unique_ptr<BytecodeModule> hbc::generateBytecodeModule(
   FunctionScopeAnalysis scopeAnalysis{lexicalTopLevel};
 
   // Allow reusing the debug cache between functions
-  HBCISelDebugCache debugCache;
+  FileAndSourceMapIdCache debugCache{};
 
   // Bytecode generation for each function.
   for (auto &F : *M) {
@@ -639,10 +639,9 @@ std::unique_ptr<BytecodeModule> hbc::generateBytecodeModule(
 
       funcGen =
           BytecodeFunctionGenerator::create(BMGen, RA.getMaxRegisterUsage());
-      HBCISel hbciSel(&F, funcGen.get(), RA, scopeAnalysis, SRA, options);
-      hbciSel.populateDebugCache(debugCache);
+      HBCISel hbciSel(
+          &F, funcGen.get(), RA, scopeAnalysis, SRA, options, debugCache);
       hbciSel.generate(sourceMapGen);
-      debugCache = hbciSel.getDebugCache();
     }
 
     if (funcGen->hasEncodingError()) {

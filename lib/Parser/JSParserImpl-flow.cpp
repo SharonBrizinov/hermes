@@ -1806,13 +1806,24 @@ Optional<ESTree::Node *> JSParserImpl::parsePrimaryTypeAnnotationFlow() {
       }
       if (tok_->getResWordOrIdentifier() == keyofIdent_) {
         advance(JSLexer::GrammarContext::Type);
-        auto optBody = parseTypeAnnotationFlow();
+        auto optBody = parsePrimaryTypeAnnotationFlow();
         if (!optBody)
           return None;
         return setLocation(
             start,
             getPrevTokenEndLoc(),
             new (context_) ESTree::KeyofTypeAnnotationNode(*optBody));
+      }
+      if (context_.getParseFlowComponentSyntax() &&
+          tok_->getResWordOrIdentifier() == rendersIdent_) {
+        advance(JSLexer::GrammarContext::Type);
+        auto optBody = parsePrimaryTypeAnnotationFlow();
+        if (!optBody)
+          return None;
+        return setLocation(
+            start,
+            getPrevTokenEndLoc(),
+            new (context_) ESTree::TypeOperatorNode(rendersIdent_, *optBody));
       }
       if (context_.getParseFlowComponentSyntax() &&
           tok_->getResWordOrIdentifier() == componentIdent_) {
