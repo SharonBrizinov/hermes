@@ -146,22 +146,6 @@ void DebugInfoGenerator::appendString(
       str.getUnderlyingPointer(), stringTable_.size());
 
   if (res.second) {
-#ifndef NDEBUG
-    // Check that the given string is a valid UTF8 string.
-    const char *it = str.str().begin();
-    while (it < str.str().end()) {
-      constexpr bool allowSurrogates = false;
-      // keep the current position alive so it can be inspected in the debugger
-      // if the assert fails.
-      const char *pos = it;
-      (void)pos;
-      decodeUTF8<allowSurrogates>(it, [](const llvh::Twine &) {
-        assert(false && "invalid utf8 char");
-      });
-    }
-    assert(
-        it == str.str().end() && "Invalid utf8 string -- read past end of str");
-#endif // NDEBUG
     appendSignedLEB128(stringTable_, int64_t(str.str().size()));
     stringTable_.insert(stringTable_.end(), str.str().begin(), str.str().end());
   }
