@@ -217,6 +217,15 @@ set(HERMES_USE_STATIC_ICU OFF CACHE BOOL
 set(HERMES_UNICODE_LITE OFF CACHE BOOL
   "Enable to use internal no-op unicode functionality instead of relying on underlying system libraries")
 
+if(WIN32 OR EMSCRIPTEN)
+  set(DEFAULT_HERMES_CHECK_NATIVE_STACK OFF)
+else()
+  set(DEFAULT_HERMES_CHECK_NATIVE_STACK ON)
+endif()
+
+set(HERMES_CHECK_NATIVE_STACK ${DEFAULT_HERMES_CHECK_NATIVE_STACK} CACHE BOOL
+  "Check the native stack for stack overflow")
+
 set(HERMES_ENABLE_DEBUGGER ON CACHE BOOL
   "Build with debugger support")
 
@@ -243,6 +252,9 @@ set(HERMES_USE_FLOWPARSER OFF CACHE BOOL
 
 set(HERMES_ENABLE_WERROR OFF CACHE BOOL
   "Whether the build should have -Werror enabled")
+
+set(HERMES_THREAD_SAFETY_ANALYSIS OFF CACHE BOOL
+  "Whether to compile with clang's -Wthread-safety")
 
 set(HERMES_ENABLE_WIN10_ICU_FALLBACK ON CACHE BOOL
   "Whether to allow falling back on Win10 ICU")
@@ -280,6 +292,16 @@ set(HERMES_BUILD_SHARED_JSI OFF CACHE BOOL "Build JSI as a shared library.")
 
 if (HERMES_IS_ANDROID)
   add_definitions(-DHERMES_PLATFORM_UNICODE=HERMES_PLATFORM_UNICODE_JAVA)
+endif()
+
+if(HERMES_CHECK_NATIVE_STACK)
+  if (WIN32 OR EMSCRIPTEN)
+    message(
+      FATAL_ERROR
+      "Native stack checking not supported on Windows or EMSCRIPTEN"
+    )
+  endif()
+  add_definitions(-DHERMES_CHECK_NATIVE_STACK)
 endif()
 
 if(HERMES_BUILD_APPLE_DSYM)
@@ -452,12 +474,6 @@ endif()
 
 if (HERMES_HARDENED)
   add_definitions(-DHERMES_HARDENED)
-endif()
-
-if ((NOT GENERATOR_IS_MULTI_CONFIG) AND (CMAKE_BUILD_TYPE STREQUAL Debug))
-    set(HERMES_ASSUMED_BUILD_MODE_IN_LIT_TEST "dbg")
-else()
-    set(HERMES_ASSUMED_BUILD_MODE_IN_LIT_TEST "opt")
 endif()
 
 if (GCC_COMPATIBLE)
@@ -715,7 +731,7 @@ if(HERMES_ENABLE_TEST_SUITE)
     hbcdump=${HERMES_TOOLS_OUTPUT_DIR}/hbcdump
     hbc-deltaprep=${HERMES_TOOLS_OUTPUT_DIR}/hbc-deltaprep
     hbc_diff=${HERMES_TOOLS_OUTPUT_DIR}/hbc-diff
-    build_mode=${HERMES_ASSUMED_BUILD_MODE_IN_LIT_TEST}
+    build_mode="$<IF:$<CONFIG:Debug>,dbg,opt>"
     exception_on_oom_enabled=${HERMESVM_EXCEPTION_ON_OOM}
     node_hermes_enabled_flag=${HERMES_BUILD_NODE_HERMES}
     node-hermes=${HERMES_TOOLS_OUTPUT_DIR}/node-hermes
@@ -723,6 +739,7 @@ if(HERMES_ENABLE_TEST_SUITE)
     gc=${HERMESVM_GCKIND}
     ubsan=${HERMES_ENABLE_UNDEFINED_BEHAVIOR_SANITIZER}
     coverage=${coverage_directory}
+    check_native_stack=${HERMES_CHECK_NATIVE_STACK}
     )
 
   set(HERMES_LIT_TEST_PARAMS

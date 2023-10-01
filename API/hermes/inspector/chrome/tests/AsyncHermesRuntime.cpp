@@ -15,7 +15,7 @@
 
 namespace facebook {
 namespace hermes {
-namespace inspector {
+namespace inspector_modern {
 namespace chrome {
 
 AsyncHermesRuntime::AsyncHermesRuntime(bool veryLazy)
@@ -81,6 +81,15 @@ void AsyncHermesRuntime::executeScriptAsync(
 
     LOG(INFO) << "AsyncHermesRuntime finished executing script id " << scriptId;
   });
+}
+
+void AsyncHermesRuntime::executeScriptSync(
+    const std::string &script,
+    const std::string &url,
+    HermesRuntime::DebugFlags flags,
+    std::chrono::milliseconds timeout) {
+  executeScriptAsync(script, url, flags);
+  wait(timeout);
 }
 
 void AsyncHermesRuntime::start() {
@@ -167,6 +176,6 @@ void AsyncHermesRuntime::unregisterForProfilingInExecutor() {
 }
 
 } // namespace chrome
-} // namespace inspector
+} // namespace inspector_modern
 } // namespace hermes
 } // namespace facebook

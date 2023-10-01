@@ -118,15 +118,6 @@ void raw_ostream_append(llvh::raw_ostream &os, Arg0 &&arg0, Args &&...args) {
   raw_ostream_append(os, args...);
 }
 
-template <typename... Args>
-jsi::JSError makeJSError(jsi::Runtime &rt, Args &&...args) {
-  std::string s;
-  llvh::raw_string_ostream os(s);
-  raw_ostream_append(os, std::forward<Args>(args)...);
-  LOG_EXCEPTION_CAUSE("JSError: %s", os.str().c_str());
-  return jsi::JSError(rt, os.str());
-}
-
 /// HermesVM uses the LLVM fatal error handle to report fatal errors. This
 /// wrapper helps us install the handler at construction time, before any
 /// HermesVM code has been invoked.
@@ -474,9 +465,9 @@ class HermesRuntimeImpl final : public HermesRuntime,
         ->value();
   }
 
-  static ::hermes::vm::Handle<::hermes::vm::HermesValue> stringHandle(
+  static ::hermes::vm::Handle<vm::StringPrimitive> stringHandle(
       const jsi::String &str) {
-    return ::hermes::vm::Handle<::hermes::vm::HermesValue>::vmcast(&phv(str));
+    return ::hermes::vm::Handle<vm::StringPrimitive>::vmcast(&phv(str));
   }
 
   static ::hermes::vm::Handle<::hermes::vm::JSObject> handle(
@@ -690,6 +681,7 @@ class HermesRuntimeImpl final : public HermesRuntime,
   void checkStatus(vm::ExecutionStatus);
   vm::HermesValue stringHVFromAscii(const char *ascii, size_t length);
   vm::HermesValue stringHVFromUtf8(const uint8_t *utf8, size_t length);
+  std::string utf8FromStringView(vm::StringView view);
 
   struct JsiProxy final : public vm::HostObjectProxy {
     HermesRuntimeImpl &rt_;
@@ -1001,6 +993,14 @@ class HermesRuntimeImpl final : public HermesRuntime,
       ContextType *context,
       const jsi::PropNameID &name,
       unsigned int paramCount);
+
+  /// Throw the exception stored in the Runtime as a jsi::JSError.
+  LLVM_ATTRIBUTE_NORETURN void throwPendingError();
+
+  /// Throw a jsi::JSError with a message created by concatenating the string
+  /// representations of \p args.
+  template <typename... Args>
+  LLVM_ATTRIBUTE_NORETURN void throwJSErrorWithMessage(Args &&...args);
 
  public:
   ManagedValues<vm::PinnedHermesValue> hermesValues_;
@@ -1615,11 +1615,7 @@ std::string HermesRuntimeImpl::utf8(const jsi::PropNameID &sym) {
   vm::GCScope gcScope(runtime_);
   vm::SymbolID id = phv(sym).getSymbol();
   auto view = runtime_.getIdentifierTable().getStringView(runtime_, id);
-  vm::SmallU16String<32> allocator;
-  std::string ret;
-  ::hermes::convertUTF16ToUTF8WithReplacements(
-      ret, view.getUTF16Ref(allocator));
-  return ret;
+  return utf8FromStringView(view);
 }
 
 bool HermesRuntimeImpl::compare(
@@ -1628,20 +1624,15 @@ bool HermesRuntimeImpl::compare(
   return phv(a).getSymbol() == phv(b).getSymbol();
 }
 
-namespace {
+std::string HermesRuntimeImpl::utf8FromStringView(vm::StringView view) {
+  if (view.isASCII())
+    return std::string{view.castToCharPtr(), view.length()};
 
-std::string toStdString(
-    vm::Runtime &runtime,
-    vm::Handle<vm::StringPrimitive> handle) {
-  auto view = vm::StringPrimitive::createStringView(runtime, handle);
-  vm::SmallU16String<32> allocator;
   std::string ret;
   ::hermes::convertUTF16ToUTF8WithReplacements(
-      ret, view.getUTF16Ref(allocator));
+      ret, llvh::ArrayRef{view.castToChar16Ptr(), view.length()});
   return ret;
 }
-
-} // namespace
 
 std::string HermesRuntimeImpl::symbolToString(const jsi::Symbol &sym) {
   vm::GCScope gcScope(runtime_);
@@ -1650,7 +1641,8 @@ std::string HermesRuntimeImpl::symbolToString(const jsi::Symbol &sym) {
       ::hermes::vm::Handle<::hermes::vm::SymbolID>::vmcast(&phv(sym)));
   checkStatus(res.getStatus());
 
-  return toStdString(runtime_, res.getValue());
+  return utf8FromStringView(
+      vm::StringPrimitive::createStringView(runtime_, *res));
 }
 
 jsi::BigInt HermesRuntimeImpl::createBigIntFromInt64(int64_t value) {
@@ -1693,7 +1685,7 @@ jsi::String HermesRuntimeImpl::bigintToString(
     const jsi::BigInt &bigint,
     int radix) {
   if (radix < 2 || radix > 36) {
-    throw makeJSError(*this, "Invalid radix ", radix, " to BigInt.toString");
+    throwJSErrorWithMessage("Invalid radix ", radix, " to BigInt.toString");
   }
 
   vm::GCScope gcScope(runtime_);
@@ -1726,10 +1718,8 @@ jsi::String HermesRuntimeImpl::createStringFromUtf8(
 }
 
 std::string HermesRuntimeImpl::utf8(const jsi::String &str) {
-  vm::GCScope gcScope(runtime_);
-  vm::Handle<vm::StringPrimitive> handle(
-      runtime_, stringHandle(str)->getString());
-  return toStdString(runtime_, handle);
+  return utf8FromStringView(
+      vm::StringPrimitive::createStringView(runtime_, stringHandle(str)));
 }
 
 jsi::Value HermesRuntimeImpl::createValueFromJsonUtf8(
@@ -2018,13 +2008,8 @@ uint8_t *HermesRuntimeImpl::data(const jsi::ArrayBuffer &arr) {
 jsi::Value HermesRuntimeImpl::getValueAtIndex(const jsi::Array &arr, size_t i) {
   vm::GCScope gcScope(runtime_);
   if (LLVM_UNLIKELY(i >= size(arr))) {
-    throw makeJSError(
-        *this,
-        "getValueAtIndex: index ",
-        i,
-        " is out of bounds [0, ",
-        size(arr),
-        ")");
+    throwJSErrorWithMessage(
+        "getValueAtIndex: index ", i, " is out of bounds [0, ", size(arr), ")");
   }
 
   auto res = vm::JSObject::getComputed_RJS(
@@ -2042,13 +2027,8 @@ void HermesRuntimeImpl::setValueAtIndexImpl(
     const jsi::Value &value) {
   vm::GCScope gcScope(runtime_);
   if (LLVM_UNLIKELY(i >= size(arr))) {
-    throw makeJSError(
-        *this,
-        "setValueAtIndex: index ",
-        i,
-        " is out of bounds [0, ",
-        size(arr),
-        ")");
+    throwJSErrorWithMessage(
+        "setValueAtIndex: index ", i, " is out of bounds [0, ", size(arr), ")");
   }
 
   auto res = vm::JSObject::putComputed_RJS(
@@ -2240,24 +2220,7 @@ void HermesRuntimeImpl::checkStatus(vm::ExecutionStatus status) {
     return;
   }
 
-  jsi::Value exception = valueFromHermesValue(runtime_.getThrownValue());
-  runtime_.clearThrownValue();
-  // Here, we increment the depth to detect recursion in error handling.
-  vm::ScopedNativeDepthTracker depthTracker{runtime_};
-  if (LLVM_LIKELY(!depthTracker.overflowed())) {
-    auto ex = jsi::JSError(*this, std::move(exception));
-    LOG_EXCEPTION_CAUSE("JSI rethrowing JS exception: %s", ex.what());
-    throw ex;
-  }
-
-  (void)runtime_.raiseStackOverflow(
-      vm::Runtime::StackOverflowKind::NativeStack);
-  exception = valueFromHermesValue(runtime_.getThrownValue());
-  runtime_.clearThrownValue();
-  // Here, we give us a little more room so we can call into JS to
-  // populate the JSError members.
-  vm::ScopedNativeDepthReducer reducer(runtime_);
-  throw jsi::JSError(*this, std::move(exception));
+  throwPendingError();
 }
 
 vm::HermesValue HermesRuntimeImpl::stringHVFromAscii(
@@ -2277,6 +2240,81 @@ vm::HermesValue HermesRuntimeImpl::stringHVFromUtf8(
       runtime_, llvh::makeArrayRef(utf8, length), IgnoreInputErrors);
   checkStatus(strRes.getStatus());
   return *strRes;
+}
+
+void HermesRuntimeImpl::throwPendingError() {
+  vm::GCScope scope{runtime_};
+
+  // Retrieve the exception value and clear as we will rethrow it as a C++
+  // exception.
+  auto hv = runtime_.getThrownValue();
+  runtime_.clearThrownValue();
+  auto jsiVal = valueFromHermesValue(hv);
+  auto hnd = vmHandleFromValue(jsiVal);
+
+  std::string msg = "No message";
+  std::string stack = "No stack";
+  if (auto str = vm::Handle<vm::StringPrimitive>::dyn_vmcast(hnd)) {
+    // If the exception is a string, use it as the message.
+    msg = utf8FromStringView(
+        vm::StringPrimitive::createStringView(runtime_, str));
+  } else if (auto obj = vm::Handle<vm::JSObject>::dyn_vmcast(hnd)) {
+    // If the exception is an object try to retrieve its message and stack
+    // properties.
+
+    /// Attempt to retrieve a string property \p sym from \c obj and store it
+    /// in \p out. Ignore any catchable errors and non-string properties.
+    auto getStrProp = [this, obj](vm::SymbolID sym, std::string &out) {
+      auto propRes = vm::JSObject::getNamed_RJS(obj, runtime_, sym);
+      if (LLVM_UNLIKELY(propRes == vm::ExecutionStatus::EXCEPTION)) {
+        // An exception was thrown while retrieving the property, if it is
+        // catchable, suppress it. Otherwise, rethrow this exception without
+        // trying to invoke any more JavaScript.
+        auto propExHv = runtime_.getThrownValue();
+        runtime_.clearThrownValue();
+
+        if (!vm::isUncatchableError(propExHv))
+          return;
+
+        // An uncatchable error occurred, it is unsafe to do anything that might
+        // execute more JavaScript.
+        throw jsi::JSError(
+            valueFromHermesValue(propExHv),
+            "Uncatchable exception thrown while creating error",
+            "No stack");
+      }
+
+      // If the property is a string, update out. Otherwise ignore it.
+      auto prop = propRes->get();
+      if (prop.isString()) {
+        auto view = vm::StringPrimitive::createStringView(
+            runtime_, runtime_.makeHandle(prop.getString()));
+        out = utf8FromStringView(view);
+      }
+    };
+
+    getStrProp(vm::Predefined::getSymbolID(vm::Predefined::message), msg);
+    getStrProp(vm::Predefined::getSymbolID(vm::Predefined::stack), stack);
+  }
+
+  // Use the constructor of jsi::JSError that cannot run additional
+  // JS, since that may then result in additional exceptions and infinite
+  // recursion.
+  throw jsi::JSError(std::move(jsiVal), msg, stack);
+}
+
+template <typename... Args>
+void HermesRuntimeImpl::throwJSErrorWithMessage(Args &&...args) {
+  // TODO: Add support for size_t in TwineChar16 and directly construct that
+  //       instead of using a stream.
+  std::string s;
+  llvh::raw_string_ostream os(s);
+  raw_ostream_append(os, std::forward<Args>(args)...);
+  LOG_EXCEPTION_CAUSE("JSError: %s", os.str().c_str());
+  // Raise an error with this message in the Runtime and rethrow it with
+  // throwPendingError.
+  (void)runtime_.raiseError(vm::TwineChar16(s));
+  throwPendingError();
 }
 
 namespace {

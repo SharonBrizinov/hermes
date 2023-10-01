@@ -21,7 +21,7 @@
 
 namespace facebook {
 namespace hermes {
-namespace inspector {
+namespace inspector_modern {
 namespace chrome {
 
 using namespace std::placeholders;
@@ -33,89 +33,68 @@ void ExecutorRuntimeAdapter::tickleJs() {
 SyncConnection::SyncConnection(
     AsyncHermesRuntime &runtime,
     bool waitForDebugger)
-    : cdpHandler_(
+    : cdpHandler_(CDPHandler::create(
           std::make_unique<ExecutorRuntimeAdapter>(runtime),
           "testConn",
-          waitForDebugger) {
-  registerCallback();
+          waitForDebugger)) {
+  registerCallbacks();
 }
 
-bool SyncConnection::registerCallback() {
-  return cdpHandler_.registerCallback(
-      std::bind(&SyncConnection::onReply, this, std::placeholders::_1));
+SyncConnection::~SyncConnection() {
+  unregisterCallbacks();
 }
 
-void SyncConnection::unregisterCallback() {
-  cdpHandler_.unregisterCallback();
+bool SyncConnection::registerCallbacks() {
+  bool registered = cdpHandler_->registerCallbacks(
+      std::bind(&SyncConnection::onReply, this, std::placeholders::_1),
+      std::bind(&SyncConnection::onUnregister, this));
+  if (registered) {
+    onUnregisterCalled_ = false;
+  }
+  return registered;
+}
+
+bool SyncConnection::unregisterCallbacks() {
+  return cdpHandler_->unregisterCallbacks();
+}
+
+bool SyncConnection::onUnregisterWasCalled() {
+  return onUnregisterCalled_;
 }
 
 void SyncConnection::send(const std::string &str) {
   LOG(INFO) << "SyncConnection::send sending " << str;
 
-  cdpHandler_.handle(str);
+  cdpHandler_->handle(str);
 }
 
-void SyncConnection::waitForResponse(
-    std::function<void(const std::string &)> handler,
-    std::chrono::milliseconds timeout) {
-  std::string reply;
+std::string SyncConnection::waitForMessage(std::chrono::milliseconds timeout) {
+  std::unique_lock<std::mutex> lock(mutex_);
 
-  {
-    std::unique_lock<std::mutex> lock(mutex_);
+  bool success = hasMessage_.wait_for(
+      lock, timeout, [this]() -> bool { return !messages_.empty(); });
 
-    bool success = hasReply_.wait_for(
-        lock, timeout, [this]() -> bool { return !replies_.empty(); });
-
-    if (!success) {
-      throw std::runtime_error("timed out waiting for reply");
-    }
-
-    reply = std::move(replies_.front());
-    replies_.pop();
+  if (!success) {
+    throw std::runtime_error("timed out waiting for reply");
   }
 
-  handler(reply);
-}
-
-void SyncConnection::waitForNotification(
-    std::function<void(const std::string &)> handler,
-    std::chrono::milliseconds timeout) {
-  std::string notification;
-
-  {
-    std::unique_lock<std::mutex> lock(mutex_);
-
-    bool success = hasNotification_.wait_for(
-        lock, timeout, [this]() -> bool { return !notifications_.empty(); });
-
-    if (!success) {
-      throw std::runtime_error("timed out waiting for notification");
-    }
-
-    notification = std::move(notifications_.front());
-    notifications_.pop();
-  }
-
-  handler(notification);
+  std::string message = std::move(messages_.front());
+  messages_.pop();
+  return message;
 }
 
 void SyncConnection::onReply(const std::string &message) {
-  JSLexer::Allocator jsonAlloc;
-  JSONFactory factory(jsonAlloc);
-  JSONObject *obj = mustParseStrAsJsonObj(message, factory);
-  LOG(INFO) << "SyncConnection::onReply got message: " << jsonValToStr(obj);
-
+  LOG(INFO) << "SyncConnection::onReply got message: " << message;
   std::lock_guard<std::mutex> lock(mutex_);
-  if (obj->count("id")) {
-    replies_.push(message);
-    hasReply_.notify_one();
-  } else {
-    notifications_.push(message);
-    hasNotification_.notify_one();
-  }
+  messages_.push(message);
+  hasMessage_.notify_one();
+}
+
+void SyncConnection::onUnregister() {
+  onUnregisterCalled_ = true;
 }
 
 } // namespace chrome
-} // namespace inspector
+} // namespace inspector_modern
 } // namespace hermes
 } // namespace facebook

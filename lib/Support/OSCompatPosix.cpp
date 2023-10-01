@@ -25,15 +25,12 @@
 #endif
 #endif // __linux__
 
+#include <pthread.h>
 #include <sys/types.h>
 #include <unistd.h>
 
 #ifdef __MACH__
 #include <mach/mach.h>
-
-#ifdef __APPLE__
-#include <pthread.h>
-#endif // __APPLE__
 
 #endif // __MACH__
 
@@ -583,10 +580,10 @@ uint64_t process_id() {
   return getpid();
 }
 
-// Platform-specific implementations of thread_id
+// Platform-specific implementations of global_thread_id
 #if defined(__APPLE__) && defined(__MACH__)
 
-uint64_t thread_id() {
+uint64_t global_thread_id() {
   uint64_t tid = 0;
   auto ret = pthread_threadid_np(nullptr, &tid);
   assert(ret == 0 && "pthread_threadid_np shouldn't fail for current thread");
@@ -596,18 +593,59 @@ uint64_t thread_id() {
 
 #elif defined(__ANDROID__)
 
-uint64_t thread_id() {
+uint64_t global_thread_id() {
   return gettid();
 }
 
 #elif defined(__linux__)
 
-uint64_t thread_id() {
+uint64_t global_thread_id() {
   return syscall(__NR_gettid);
 }
 
 #else
 #error "Thread ID not supported on this platform"
+#endif
+
+#if defined(__APPLE__) && defined(__MACH__)
+
+std::pair<const void *, size_t> thread_stack_bounds(unsigned gap) {
+  pthread_t tid = pthread_self();
+  void *origin = pthread_get_stackaddr_np(tid);
+  rlim_t size = 0;
+  if (pthread_main_np()) {
+    // According to
+    // https://opensource.apple.com/source/WTFEmbedded/WTFEmbedded-95.23/wtf/StackBounds.cpp.auto.html
+    // pthread_get_size lies to us when we're the main thread, use get_rlimit
+    // instead
+    struct rlimit limit;
+    getrlimit(RLIMIT_STACK, &limit);
+    size = limit.rlim_cur;
+  } else {
+    size = pthread_get_stacksize_np(tid);
+  }
+
+  return {origin, gap < size ? size - gap : 0};
+}
+
+#else
+
+std::pair<const void *, size_t> thread_stack_bounds(unsigned gap) {
+  pthread_attr_t attr;
+  pthread_attr_init(&attr);
+  pthread_getattr_np(pthread_self(), &attr);
+
+  void *origin;
+  size_t size;
+  pthread_attr_getstack(&attr, &origin, &size);
+
+  pthread_attr_destroy(&attr);
+
+  // origin is now the lowest addressable byte.
+  unsigned adjustedSize = gap < size ? size - gap : 0;
+  return {(char *)origin + size, adjustedSize};
+}
+
 #endif
 
 void set_thread_name(const char *name) {

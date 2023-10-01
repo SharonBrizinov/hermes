@@ -11,23 +11,31 @@
 'use strict';
 
 import type {ObjectWithLoc} from 'hermes-estree';
-import * as FlowESTree from 'hermes-estree';
+import type {TranslationOptions} from './utils/TranslationUtils';
 import type {ScopeManager} from 'hermes-eslint';
+
+import * as FlowESTree from 'hermes-estree';
+import * as TSESTree from './utils/ts-estree-ast-types';
 import {
   cloneJSDocCommentsToNewNode as cloneJSDocCommentsToNewNodeOriginal,
   makeCommentOwnLine as makeCommentOwnLineOriginal,
 } from 'hermes-transform';
-import * as TSESTree from './utils/ts-estree-ast-types';
 import {
   buildCodeFrame,
   translationError as translationErrorBase,
   unexpectedTranslationError as unexpectedTranslationErrorBase,
 } from './utils/ErrorUtils';
 import {removeAtFlowFromDocblock} from './utils/DocblockUtils';
-import type {TranslationOptions} from './utils/TranslationUtils';
 import {EOL} from 'os';
 
 type DeclarationOrUnsupported<T> = T | TSESTree.TSTypeAliasDeclaration;
+
+function constructFlowNode<T: FlowESTree.BaseNode>(
+  node: $Diff<T, FlowESTree.BaseNode>,
+): T {
+  // $FlowFixMe[prop-missing]
+  return node;
+}
 
 const cloneJSDocCommentsToNewNode =
   // $FlowExpectedError[incompatible-cast] - trust me this re-type is 100% safe
@@ -44,6 +52,19 @@ function isValidReactImportOrGlobal(id: FlowESTree.Identifier): boolean {
 }
 
 let shouldAddReactImport: boolean | null = null;
+
+// Returns appropriate Identifier for `React` import.
+// If a global is in use, set a flag to indicate that we should add the import.
+function getReactIdentifier(hasReactImport: boolean) {
+  if (shouldAddReactImport !== false) {
+    shouldAddReactImport = !hasReactImport;
+  }
+
+  return {
+    type: 'Identifier',
+    name: `React`,
+  };
+}
 
 export function flowDefToTSDef(
   originalCode: string,
@@ -204,10 +225,10 @@ const getTransforms = (
     return globalScope;
   })();
 
-  function isReactImport(id: FlowESTree.Identifier): boolean {
+  function isReactImport(scopeNode: FlowESTree.ESNode, name: string): boolean {
     let currentScope = (() => {
       let scope = null;
-      let node: FlowESTree.ESNode = id;
+      let node: FlowESTree.ESNode = scopeNode;
       while (!scope && node) {
         scope = scopeManager.acquire(node, true);
         node = node.parent;
@@ -223,7 +244,7 @@ const getTransforms = (
     const variableDef = (() => {
       while (currentScope != null) {
         for (const variable of currentScope.variables) {
-          if (variable.defs.length && variable.name === id.name) {
+          if (variable.defs.length && variable.name === name) {
             return variable;
           }
         }
@@ -254,7 +275,7 @@ const getTransforms = (
 
       // Globals
       case 'ImplicitGlobalVariable': {
-        return VALID_REACT_IMPORTS.has(id.name);
+        return VALID_REACT_IMPORTS.has(name);
       }
 
       // TODO Handle:
@@ -664,6 +685,10 @@ const getTransforms = (
         return transform.InferTypeAnnotation(node);
       case 'KeyofTypeAnnotation':
         return transform.KeyofTypeAnnotation(node);
+      case 'TypeOperator':
+        return transform.TypeOperator(node);
+      case 'ComponentTypeAnnotation':
+        return transform.ComponentTypeAnnotation(node);
       default:
         throw unexpectedTranslationError(node, `Unhandled type ${node.type}`);
     }
@@ -992,6 +1017,23 @@ const getTransforms = (
             ];
           }
 
+          // TS doesn't support direct default export for declare'd functions
+          case 'DeclareComponent': {
+            const functionDecl = transform.DeclareComponent(declaration);
+            const name = declaration.id.name;
+            return [
+              functionDecl,
+              {
+                type: 'ExportDefaultDeclaration',
+                declaration: {
+                  type: 'Identifier',
+                  name,
+                },
+                exportKind: 'value',
+              },
+            ];
+          }
+
           // Flow's declare export default Identifier is ambiguous.
           // the Identifier might reference a type, or it might reference a value
           // - If it's a value, then that's all good, TS supports that.
@@ -1128,6 +1170,13 @@ const getTransforms = (
                     exportKind: 'value',
                   },
                 ];
+              case 'DeclareComponent':
+                return [
+                  {
+                    declaration: transform.DeclareComponent(node.declaration),
+                    exportKind: 'value',
+                  },
+                ];
               case 'DeclareFunction':
                 return [
                   {
@@ -1199,6 +1248,134 @@ const getTransforms = (
           }: TSESTree.ExportNamedDeclarationWithSource);
         }
       }
+    },
+    DeclareComponent(
+      node: FlowESTree.DeclareComponent,
+    ): TSESTree.TSDeclareFunction {
+      const id = transform.Identifier(node.id, false);
+
+      const typeParameters =
+        node.typeParameters == null
+          ? undefined
+          : transform.TypeParameterDeclaration(node.typeParameters);
+
+      const params = transform.ComponentTypeParameters(node.params, node.rest);
+
+      // TS cannot support `renderType` so we always use ReactNode as the return type.
+      const hasReactImport = isReactImport(node, 'React');
+      const returnType = {
+        type: 'TSTypeAnnotation',
+        // If no rendersType we assume its ReactNode type.
+        typeAnnotation: {
+          type: 'TSTypeReference',
+          typeName: {
+            type: 'TSQualifiedName',
+            left: getReactIdentifier(hasReactImport),
+            right: {
+              type: 'Identifier',
+              name: `ReactNode`,
+            },
+          },
+          typeParameters: undefined,
+        },
+      };
+
+      return {
+        type: 'TSDeclareFunction',
+        async: false,
+        body: undefined,
+        declare: true,
+        expression: false,
+        generator: false,
+        id: {
+          type: 'Identifier',
+          name: id.name,
+        },
+        params,
+        returnType: returnType,
+        typeParameters: typeParameters,
+      };
+    },
+    ComponentTypeParameters(
+      params: $ReadOnlyArray<FlowESTree.ComponentTypeParameter>,
+      rest: FlowESTree.ComponentTypeParameter | null,
+    ): $ReadOnlyArray<TSESTree.Parameter> {
+      if (params.length === 0 && rest != null) {
+        return [
+          {
+            type: 'Identifier',
+            name: 'props',
+            typeAnnotation: {
+              type: 'TSTypeAnnotation',
+              typeAnnotation: transformTypeAnnotationType(rest.typeAnnotation),
+            },
+            optional: false,
+          },
+        ];
+      }
+
+      const flowPropsType: Array<
+        FlowESTree.ObjectTypeProperty | FlowESTree.ObjectTypeSpreadProperty,
+      > = [];
+
+      if (rest != null) {
+        flowPropsType.push(
+          constructFlowNode<FlowESTree.ObjectTypeSpreadProperty>({
+            type: 'ObjectTypeSpreadProperty',
+            argument: rest.typeAnnotation,
+            range: rest.range,
+            loc: rest.loc,
+          }),
+        );
+      }
+
+      for (let i = 0; i < params.length; i++) {
+        const param = params[i];
+        flowPropsType.push(
+          constructFlowNode<FlowESTree.ObjectTypePropertySignature>({
+            type: 'ObjectTypeProperty',
+            kind: 'init',
+            method: false,
+            optional: param.optional,
+            variance: null,
+            proto: false,
+            static: false,
+            key:
+              param.name ??
+              constructFlowNode<FlowESTree.Identifier>({
+                type: 'Identifier',
+                name: `$$PARAM_${i}$$`,
+                optional: false,
+                typeAnnotation: null,
+              }),
+            value: param.typeAnnotation,
+            range: param.range,
+            loc: param.loc,
+          }),
+        );
+      }
+      const tsPropsObjectType = transform.ObjectTypeAnnotation(
+        constructFlowNode<FlowESTree.ObjectTypeAnnotation>({
+          type: 'ObjectTypeAnnotation',
+          inexact: false,
+          exact: true,
+          properties: flowPropsType,
+          indexers: [],
+          callProperties: [],
+          internalSlots: [],
+        }),
+      );
+      return [
+        {
+          type: 'Identifier',
+          name: 'props',
+          typeAnnotation: {
+            type: 'TSTypeAnnotation',
+            typeAnnotation: tsPropsObjectType,
+          },
+          optional: false,
+        },
+      ];
     },
     DeclareFunction(
       node: FlowESTree.DeclareFunction,
@@ -1846,21 +2023,8 @@ const getTransforms = (
 
       // React special conversion:
       const validReactImportOrGlobal = isValidReactImportOrGlobal(baseId);
-      const reactImport = isReactImport(baseId);
-      if (validReactImportOrGlobal || reactImport) {
-        // Returns appropriate Identifier for `React` import.
-        // If a global is in use, set a flag to indicate that we should add the import.
-        const getReactIdentifier = () => {
-          if (shouldAddReactImport !== false) {
-            shouldAddReactImport = !reactImport;
-          }
-
-          return {
-            type: 'Identifier',
-            name: `React`,
-          };
-        };
-
+      const hasReactImport = isReactImport(baseId, baseId.name);
+      if (validReactImportOrGlobal || hasReactImport) {
         switch (fullTypeName) {
           // TODO: In flow this is `ChildrenArray<T> = T | $ReadOnlyArray<ChildrenArray<T>>`.
           // The recursive nature of it is rarely needed, so we're simplifying this for now
@@ -1912,7 +2076,7 @@ const getTransforms = (
               type: 'TSTypeReference',
               typeName: {
                 type: 'TSQualifiedName',
-                left: getReactIdentifier(),
+                left: getReactIdentifier(hasReactImport),
                 right: {
                   type: 'Identifier',
                   name: 'Component',
@@ -1933,7 +2097,7 @@ const getTransforms = (
               type: 'TSTypeReference',
               typeName: {
                 type: 'TSQualifiedName',
-                left: getReactIdentifier(),
+                left: getReactIdentifier(hasReactImport),
                 right: {
                   type: 'Identifier',
                   name: `Context`,
@@ -1953,7 +2117,7 @@ const getTransforms = (
               type: 'TSTypeReference',
               typeName: {
                 type: 'TSQualifiedName',
-                left: getReactIdentifier(),
+                left: getReactIdentifier(hasReactImport),
                 right: {
                   type: 'Identifier',
                   name: 'Key',
@@ -1969,7 +2133,7 @@ const getTransforms = (
               type: 'TSTypeReference',
               typeName: {
                 type: 'TSQualifiedName',
-                left: getReactIdentifier(),
+                left: getReactIdentifier(hasReactImport),
                 right: {
                   type: 'Identifier',
                   name: `ElementType`,
@@ -1986,7 +2150,7 @@ const getTransforms = (
               type: 'TSTypeReference',
               typeName: {
                 type: 'TSQualifiedName',
-                left: getReactIdentifier(),
+                left: getReactIdentifier(hasReactImport),
                 right: {
                   type: 'Identifier',
                   name: `ReactNode`,
@@ -2002,7 +2166,7 @@ const getTransforms = (
               type: 'TSTypeReference',
               typeName: {
                 type: 'TSQualifiedName',
-                left: getReactIdentifier(),
+                left: getReactIdentifier(hasReactImport),
                 right: {
                   type: 'Identifier',
                   name: `ReactElement`,
@@ -2022,7 +2186,7 @@ const getTransforms = (
               type: 'TSTypeReference',
               typeName: {
                 type: 'TSQualifiedName',
-                left: getReactIdentifier(),
+                left: getReactIdentifier(hasReactImport),
                 right: {
                   type: 'Identifier',
                   name: `ElementRef`,
@@ -2042,7 +2206,7 @@ const getTransforms = (
               type: 'TSTypeReference',
               typeName: {
                 type: 'TSQualifiedName',
-                left: getReactIdentifier(),
+                left: getReactIdentifier(hasReactImport),
                 right: {
                   type: 'Identifier',
                   name: `Fragment`,
@@ -2077,7 +2241,7 @@ const getTransforms = (
               type: 'TSTypeReference',
               typeName: {
                 type: 'TSQualifiedName',
-                left: getReactIdentifier(),
+                left: getReactIdentifier(hasReactImport),
                 right: {
                   type: 'Identifier',
                   name: 'ComponentType',
@@ -2149,7 +2313,7 @@ const getTransforms = (
               type: 'TSTypeReference',
               typeName: {
                 type: 'TSQualifiedName',
-                left: getReactIdentifier(),
+                left: getReactIdentifier(hasReactImport),
                 right: {
                   type: 'Identifier',
                   name: 'ComponentType',
@@ -2169,7 +2333,7 @@ const getTransforms = (
               type: 'TSTypeReference',
               typeName: {
                 type: 'TSQualifiedName',
-                left: getReactIdentifier(),
+                left: getReactIdentifier(hasReactImport),
                 right: {
                   type: 'Identifier',
                   name: 'ComponentProps',
@@ -2207,7 +2371,7 @@ const getTransforms = (
                     type: 'TSTypeReference',
                     typeName: {
                       type: 'TSQualifiedName',
-                      left: getReactIdentifier(),
+                      left: getReactIdentifier(hasReactImport),
                       right: {
                         type: 'Identifier',
                         name: `ComponentProps`,
@@ -2242,7 +2406,7 @@ const getTransforms = (
                         type: 'TSTypeReference',
                         typeName: {
                           type: 'TSQualifiedName',
-                          left: getReactIdentifier(),
+                          left: getReactIdentifier(hasReactImport),
                           right: {
                             type: 'Identifier',
                             name: 'Ref',
@@ -3164,6 +3328,61 @@ const getTransforms = (
         type: 'TSTypeOperator',
         operator: 'keyof',
         typeAnnotation: transformTypeAnnotationType(node.argument),
+      };
+    },
+    TypeOperator(node: FlowESTree.TypeOperator): TSESTree.TypeNode {
+      switch (node.operator) {
+        case 'renders': {
+          const hasReactImport = isReactImport(node, 'React');
+          return {
+            type: 'TSTypeReference',
+            typeName: {
+              type: 'TSQualifiedName',
+              left: getReactIdentifier(hasReactImport),
+              right: {
+                type: 'Identifier',
+                name: `ReactNode`,
+              },
+            },
+            typeParameters: undefined,
+          };
+        }
+      }
+    },
+    ComponentTypeAnnotation(
+      node: FlowESTree.ComponentTypeAnnotation,
+    ): TSESTree.TSFunctionType {
+      const typeParameters =
+        node.typeParameters == null
+          ? undefined
+          : transform.TypeParameterDeclaration(node.typeParameters);
+
+      const params = transform.ComponentTypeParameters(node.params, node.rest);
+
+      // TS cannot support `renderType` so we always use ReactNode as the return type.
+      const hasReactImport = isReactImport(node, 'React');
+      const returnType = {
+        type: 'TSTypeAnnotation',
+        // If no rendersType we assume its ReactNode type.
+        typeAnnotation: {
+          type: 'TSTypeReference',
+          typeName: {
+            type: 'TSQualifiedName',
+            left: getReactIdentifier(hasReactImport),
+            right: {
+              type: 'Identifier',
+              name: `ReactNode`,
+            },
+          },
+          typeParameters: undefined,
+        },
+      };
+
+      return {
+        type: 'TSFunctionType',
+        typeParameters,
+        params,
+        returnType,
       };
     },
   };

@@ -25,10 +25,10 @@
 
 namespace facebook {
 namespace hermes {
-namespace inspector {
+namespace inspector_modern {
 namespace chrome {
 
-namespace m = ::facebook::hermes::inspector::chrome::message;
+namespace m = ::facebook::hermes::inspector_modern::chrome::message;
 
 using namespace std::chrono_literals;
 
@@ -58,29 +58,24 @@ struct ConnectionTests : public ::testing::Test {
 
 template <typename ResponseType>
 ResponseType expectResponse(SyncConnection &conn, int id) {
-  ResponseType resp;
+  const std::string message = conn.waitForMessage();
 
-  conn.waitForResponse([id, &resp](const std::string &str) {
-    JSLexer::Allocator jsonAlloc;
-    JSONFactory factory(jsonAlloc);
-    resp = mustMake<ResponseType>(mustParseStrAsJsonObj(str, factory));
-    EXPECT_EQ(resp.id, id);
-  });
+  JSLexer::Allocator jsonAlloc;
+  JSONFactory factory(jsonAlloc);
+  ResponseType resp =
+      mustMake<ResponseType>(mustParseStrAsJsonObj(message, factory));
+  EXPECT_EQ(resp.id, id);
 
   return resp;
 }
 
 template <typename NotificationType>
 NotificationType expectNotification(SyncConnection &conn) {
-  NotificationType note;
+  const std::string reply = conn.waitForMessage();
 
-  conn.waitForNotification([&note](const std::string &str) {
-    JSLexer::Allocator jsonAlloc;
-    JSONFactory factory(jsonAlloc);
-    note = mustMake<NotificationType>(mustParseStrAsJsonObj(str, factory));
-  });
-
-  return note;
+  JSLexer::Allocator jsonAlloc;
+  JSONFactory factory(jsonAlloc);
+  return mustMake<NotificationType>(mustParseStrAsJsonObj(reply, factory));
 }
 
 class UnexpectedNotificationException : public std::runtime_error {
@@ -90,18 +85,15 @@ class UnexpectedNotificationException : public std::runtime_error {
 };
 
 void expectNothing(SyncConnection &conn) {
-  bool gotSomething = false;
   try {
-    conn.waitForNotification(
-        [&gotSomething](const std::string &str) { gotSomething = true; });
+    conn.waitForMessage();
   } catch (...) {
     // if no values are received it times out with an exception
     // so we can say that we've succeeded at seeing nothing
     return;
   }
-  if (gotSomething) {
-    throw std::runtime_error("received a notification but didn't expect one");
-  }
+
+  throw std::runtime_error("received a notification but didn't expect one");
 }
 
 struct FrameInfo {
@@ -349,6 +341,31 @@ void expectEvalException(
   }
 }
 
+// Expect a sequence of messages conveying a heap snapshot:
+// 1 or more notifications containing chunks of the snapshot JSON object
+// followed by an OK response to the snapshot request.
+// conn specifies the connection from which to receive. id specifies the
+// id of the snapshot request.
+void expectHeapSnapshot(SyncConnection &conn, int id) {
+  JSLexer::Allocator jsonAlloc;
+  JSONFactory factory(jsonAlloc);
+
+  // Expect chunk notifications until the snapshot object is complete. Fail if
+  // the object is invalid (e.g. truncated data, excess data, malformed JSON).
+  // There is no indication of how many segments there will be, so just receive
+  // until the object is complete, then expect no more.
+  std::stringstream snapshot;
+  do {
+    auto note =
+        expectNotification<m::heapProfiler::AddHeapSnapshotChunkNotification>(
+            conn);
+    snapshot << note.chunk;
+  } while (!parseStrAsJsonObj(snapshot.str(), factory).has_value());
+
+  // Expect the snapshot response after all chunks have been received.
+  expectResponse<m::OkResponse>(conn, id);
+}
+
 struct PropInfo {
   PropInfo(const std::string &type) : type(type) {}
 
@@ -476,6 +493,48 @@ m::runtime::CallArgument makeObjectIdCallArgument(
 
 } // namespace
 
+// Test that destructing a CDPHandler does not leave the runtime in any bad
+// state.
+TEST(CleanUpTests, testDestructor) {
+  int msgId = 0;
+  AsyncHermesRuntime asyncRuntime;
+  asyncRuntime.executeScriptSync(R"(
+    var a = 0;
+    var console = {
+      log: function(...args){
+        a += 1;
+      }
+    };
+  )");
+  {
+    SyncConnection conn{asyncRuntime};
+    send<m::runtime::EnableRequest>(conn, msgId++);
+    expectExecutionContextCreated(conn);
+    asyncRuntime.executeScriptAsync(R"(console.log("hi");)");
+    JSLexer::Allocator jsonAlloc;
+    JSONFactory factory{jsonAlloc};
+    // Verify that console.log has been intercepted by the handler and emits the
+    // correct CDP event.
+    const std::string message = conn.waitForMessage();
+    auto parsedNote = mustParseStrAsJsonObj(message, factory);
+    message::JSONValue *methodRes = parsedNote->get("method");
+    EXPECT_TRUE(methodRes != nullptr);
+    std::unique_ptr<std::string> method =
+        message::valueFromJson<std::string>(methodRes);
+    EXPECT_TRUE(method != nullptr);
+    EXPECT_EQ(*method, "Runtime.consoleAPICalled");
+  }
+  // The destructor has been called. Calling any console methods should not
+  // break, and the original console method is still called.
+  asyncRuntime.executeScriptSync(R"(console.log("bye");)");
+  std::shared_ptr<HermesRuntime> rt = asyncRuntime.runtime();
+  jsi::Value a = rt->global().getProperty(*rt, "a");
+  EXPECT_TRUE(a.isNumber());
+  // a should have been incremented to two, since there have been two console
+  // log statements executed.
+  EXPECT_EQ(a.getNumber(), 2);
+}
+
 TEST_F(ConnectionTests, testUnregisteringCallback) {
   asyncRuntime.executeScriptAsync(R"(
     var a = 1 + 2;
@@ -485,12 +544,33 @@ TEST_F(ConnectionTests, testUnregisteringCallback) {
   send<m::debugger::EnableRequest>(conn, 1);
   expectNotification<m::debugger::ScriptParsedNotification>(conn);
 
-  conn.unregisterCallback();
+  EXPECT_TRUE(conn.unregisterCallbacks());
+  EXPECT_TRUE(conn.onUnregisterWasCalled());
+  EXPECT_FALSE(conn.unregisterCallbacks());
 
   conn.send(R"({"id": 2, "method": "Debugger.foo"})");
   expectNothing(conn);
 
-  EXPECT_TRUE(conn.registerCallback());
+  EXPECT_TRUE(conn.registerCallbacks());
+}
+
+TEST_F(ConnectionTests, testScriptsOnEnable) {
+  int msgId = 1;
+
+  asyncRuntime.executeScriptAsync(R"(
+    true
+  )");
+
+  send<m::debugger::EnableRequest>(conn, msgId++);
+  expectNotification<m::debugger::ScriptParsedNotification>(conn);
+
+  send<m::debugger::EnableRequest>(conn, msgId++);
+  expectNotification<m::debugger::ScriptParsedNotification>(conn);
+
+  send<m::debugger::DisableRequest>(conn, msgId++);
+
+  send<m::debugger::EnableRequest>(conn, msgId++);
+  expectNotification<m::debugger::ScriptParsedNotification>(conn);
 }
 
 TEST_F(ConnectionTests, testRespondsErrorToUnknownRequests) {
@@ -1961,6 +2041,7 @@ TEST_F(ConnectionTests, testRuntimeCallFunctionOnObject) {
 
   send<m::debugger::EnableRequest>(conn, msgId++);
   expectNotification<m::debugger::ScriptParsedNotification>(conn);
+  expectPaused(conn, "other", {{"global", 1, 1}});
 
   // create a new Object() that will be used as "this" below.
   m::runtime::RemoteObjectId thisId;
@@ -2092,6 +2173,7 @@ TEST_F(ConnectionTests, testRuntimeCallFunctionOnExecutionContext) {
 
   send<m::debugger::EnableRequest>(conn, msgId++);
   expectNotification<m::debugger::ScriptParsedNotification>(conn);
+  expectPaused(conn, "other", {{"global", 1, 1}});
 
   // globalThisId is the inspector's object Id for globalThis.
   m::runtime::RemoteObjectId globalThisId;
@@ -2201,64 +2283,37 @@ TEST_F(ConnectionTests, testConsoleLog) {
   send<m::debugger::ResumeRequest>(conn, msgId++);
   expectNotification<m::debugger::ResumedNotification>(conn);
 
-  // Two notifications (hitting debugger and console API call) can appear
-  // in any order. We wait for two notifications here and later check
-  // that both of them were hit.
-  bool receivedConsoleNotification = false;
-  bool receivedPausedNotification = false;
-  for (size_t i = 0; i < 2; ++i) {
-    conn.waitForNotification([this,
-                              &receivedConsoleNotification,
-                              &receivedPausedNotification,
-                              &msgId](const std::string &str) {
-      auto parsedNote = mustParseStrAsJsonObj(str, factory);
-      message::JSONValue *methodRes = parsedNote->get("method");
-      EXPECT_TRUE(methodRes != nullptr);
-      std::unique_ptr<std::string> method =
-          message::valueFromJson<std::string>(methodRes);
-      EXPECT_TRUE(method != nullptr);
-      if (*method == "Runtime.consoleAPICalled") {
-        receivedConsoleNotification = true;
-        auto note =
-            mustMake<m::runtime::ConsoleAPICalledNotification>(parsedNote);
-        EXPECT_EQ(note.type, "warning");
-        EXPECT_EQ(note.args.size(), 3);
+  auto warningNote =
+      expectNotification<m::runtime::ConsoleAPICalledNotification>(conn);
+  EXPECT_EQ(warningNote.type, "warning");
+  EXPECT_EQ(warningNote.args.size(), 3);
 
-        EXPECT_EQ(note.args[0].type, "string");
-        EXPECT_EQ(*note.args[0].value, "\"string value\"");
+  EXPECT_EQ(warningNote.args[0].type, "string");
+  EXPECT_EQ(*warningNote.args[0].value, "\"string value\"");
 
-        EXPECT_EQ(note.args[1].type, "object");
-        expectProps(
-            conn,
-            msgId++,
-            note.args[1].objectId.value(),
-            {{"number1", PropInfo("number").setValue("1")},
-             {"bool1", PropInfo("boolean").setValue("false")},
-             {"__proto__", PropInfo("object")}});
+  EXPECT_EQ(warningNote.args[1].type, "object");
 
-        EXPECT_EQ(note.args[2].type, "object");
-        expectProps(
-            conn,
-            msgId++,
-            note.args[2].objectId.value(),
-            {{"number2", PropInfo("number").setValue("2")},
-             {"bool2", PropInfo("boolean").setValue("true")},
-             {"__proto__", PropInfo("object")}});
-      } else if (*method == "Debugger.paused") {
-        receivedPausedNotification = true;
-        auto note = mustMake<m::debugger::PausedNotification>(parsedNote);
-        EXPECT_EQ(note.reason, "other");
-        EXPECT_EQ(note.callFrames.size(), 1);
-        EXPECT_EQ(note.callFrames[0].functionName, "global");
-        EXPECT_EQ(note.callFrames[0].location.lineNumber, 6);
-      } else {
-        throw UnexpectedNotificationException();
-      }
-    });
-  }
+  EXPECT_EQ(warningNote.args[2].type, "object");
 
-  EXPECT_TRUE(receivedConsoleNotification);
-  EXPECT_TRUE(receivedPausedNotification);
+  expectPaused(conn, "other", {{"global", 6, 1}});
+
+  // Requesting object properties sends requests and expects response messages
+  // with the result, so this must be done after the paused message above has
+  // already been removed from the queue of incoming messages.
+  expectProps(
+      conn,
+      msgId++,
+      warningNote.args[1].objectId.value(),
+      {{"number1", PropInfo("number").setValue("1")},
+       {"bool1", PropInfo("boolean").setValue("false")},
+       {"__proto__", PropInfo("object")}});
+  expectProps(
+      conn,
+      msgId++,
+      warningNote.args[2].objectId.value(),
+      {{"number2", PropInfo("number").setValue("2")},
+       {"bool2", PropInfo("boolean").setValue("true")},
+       {"__proto__", PropInfo("object")}});
 
   // Resume and expect no further notifications
   send<m::debugger::ResumeRequest>(conn, msgId++);
@@ -2291,82 +2346,52 @@ TEST_F(ConnectionTests, testConsoleGroup) {
   send<m::debugger::ResumeRequest>(conn, msgId++);
   expectNotification<m::debugger::ResumedNotification>(conn);
 
-  // Debugger and console notifications can appear out of order. We wait for
-  // all notifications here and later check that all of them were hit. The
-  // correct order of the multiple console notifications is checked.
-  bool receivedGroupStartNotification = false;
-  bool receivedGroupEndNotification = false;
-  bool receivedPausedNotification = false;
   constexpr long long kNewYears2023 = 1672549200000;
   constexpr long long kNewYears3023 = 33229458000000;
-  for (size_t i = 0; i < 3; ++i) {
-    conn.waitForNotification([this,
-                              &receivedGroupStartNotification,
-                              &receivedGroupEndNotification,
-                              &receivedPausedNotification,
-                              &msgId,
-                              kNewYears2023,
-                              kNewYears3023](const std::string &str) {
-      auto parsedNote = mustParseStrAsJsonObj(str, factory);
-      std::string method;
-      EXPECT_TRUE(message::assign(method, parsedNote, "method"));
-      if (method == "Runtime.consoleAPICalled") {
-        if (!receivedGroupStartNotification) {
-          auto note =
-              mustMake<m::runtime::ConsoleAPICalledNotification>(parsedNote);
-          EXPECT_EQ(note.type, "startGroup");
-          receivedGroupStartNotification = true;
 
-          EXPECT_GT(note.timestamp, kNewYears2023);
-          EXPECT_LT(note.timestamp, kNewYears3023);
-          EXPECT_EQ(note.args.size(), 3);
+  auto groupNote =
+      expectNotification<m::runtime::ConsoleAPICalledNotification>(conn);
+  EXPECT_EQ(groupNote.type, "startGroup");
 
-          EXPECT_EQ(note.args[0].type, "string");
-          EXPECT_EQ(note.args[0].value.value(), "\"grouping\"");
+  EXPECT_GT(groupNote.timestamp, kNewYears2023);
+  EXPECT_LT(groupNote.timestamp, kNewYears3023);
+  EXPECT_EQ(groupNote.args.size(), 3);
 
-          EXPECT_EQ(note.args[1].type, "object");
-          expectProps(
-              conn,
-              msgId++,
-              note.args[1].objectId.value(),
-              {{"number1", PropInfo("number").setValue("1")},
-               {"bool1", PropInfo("boolean").setValue("false")},
-               {"__proto__", PropInfo("object")}});
+  EXPECT_EQ(groupNote.args[0].type, "string");
+  EXPECT_EQ(groupNote.args[0].value.value(), "\"grouping\"");
 
-          EXPECT_EQ(note.args[2].type, "object");
-          expectProps(
-              conn,
-              msgId++,
-              note.args[2].objectId.value(),
-              {{"number2", PropInfo("number").setValue("2")},
-               {"bool2", PropInfo("boolean").setValue("true")},
-               {"__proto__", PropInfo("object")}});
-        } else {
-          auto note =
-              mustMake<m::runtime::ConsoleAPICalledNotification>(parsedNote);
-          EXPECT_EQ(note.type, "endGroup");
-          receivedGroupEndNotification = true;
+  EXPECT_EQ(groupNote.args[1].type, "object");
 
-          EXPECT_GT(note.timestamp, kNewYears2023);
-          EXPECT_LT(note.timestamp, kNewYears3023);
-          EXPECT_EQ(note.args.size(), 0);
-        }
-      } else if (method == "Debugger.paused") {
-        receivedPausedNotification = true;
-        auto note = mustMake<m::debugger::PausedNotification>(parsedNote);
-        EXPECT_EQ(note.reason, "other");
-        EXPECT_EQ(note.callFrames.size(), 1);
-        EXPECT_EQ(note.callFrames[0].functionName, "global");
-        EXPECT_EQ(note.callFrames[0].location.lineNumber, 9);
-      } else {
-        throw UnexpectedNotificationException();
-      }
-    });
-  }
+  EXPECT_EQ(groupNote.args[2].type, "object");
 
-  EXPECT_TRUE(receivedGroupStartNotification);
-  EXPECT_TRUE(receivedGroupEndNotification);
-  EXPECT_TRUE(receivedPausedNotification);
+  auto endNote =
+      expectNotification<m::runtime::ConsoleAPICalledNotification>(conn);
+  EXPECT_EQ(endNote.type, "endGroup");
+
+  EXPECT_GT(endNote.timestamp, kNewYears2023);
+  EXPECT_LT(endNote.timestamp, kNewYears3023);
+  EXPECT_EQ(endNote.args.size(), 0);
+
+  expectPaused(conn, "other", {{"global", 9, 1}});
+
+  // Requesting object properties sends requests and expects response messages
+  // with the result, so this must be done after the groupEnd and paused
+  // messages above have already been removed from the queue of incoming
+  // messages.
+  expectProps(
+      conn,
+      msgId++,
+      groupNote.args[1].objectId.value(),
+      {{"number1", PropInfo("number").setValue("1")},
+       {"bool1", PropInfo("boolean").setValue("false")},
+       {"__proto__", PropInfo("object")}});
+  expectProps(
+      conn,
+      msgId++,
+      groupNote.args[2].objectId.value(),
+      {{"number2", PropInfo("number").setValue("2")},
+       {"bool2", PropInfo("boolean").setValue("true")},
+       {"__proto__", PropInfo("object")}});
 
   // Resume and expect no further notifications
   send<m::debugger::ResumeRequest>(conn, msgId++);
@@ -2388,30 +2413,24 @@ TEST_F(ConnectionTests, testConsoleBuffer) {
   asyncRuntime.executeScriptAsync(oss.str());
   asyncRuntime.wait();
 
-  send<m::runtime::EnableRequest>(conn, msgId++);
-  expectExecutionContextCreated(conn);
-
   bool receivedWarning = false;
   std::array<bool, kExpectedMaxBufferSize> received;
-  received.fill(false);
 
-  // Loop for 1 iteration more than kExpectedMaxBufferSize because there is a
-  // warning message given when buffer is exceeded
-  for (size_t i = 0; i < kExpectedMaxBufferSize + 1; i++) {
-    conn.waitForNotification([this,
-                              kNumLogsToTest,
-                              &receivedWarning,
-                              &received](const std::string &str) {
-      auto parsedNote = mustParseStrAsJsonObj(str, factory);
-      message::JSONValue *methodRes = parsedNote->get("method");
-      EXPECT_TRUE(methodRes != nullptr);
-      std::unique_ptr<std::string> method =
-          message::valueFromJson<std::string>(methodRes);
-      EXPECT_TRUE(method != nullptr);
-      EXPECT_EQ(*method, "Runtime.consoleAPICalled");
+  // Test for repeated connection by sending Runtime.enable multiple times. It's
+  // expected that the message cache is always kept around and provided to the
+  // frontend each time.
+  for (int numConnect = 0; numConnect < 2; numConnect++) {
+    receivedWarning = false;
+    received.fill(false);
 
+    send<m::runtime::EnableRequest>(conn, msgId++);
+    expectExecutionContextCreated(conn);
+
+    // Loop for 1 iteration more than kExpectedMaxBufferSize because there is a
+    // warning message given when buffer is exceeded
+    for (size_t i = 0; i < kExpectedMaxBufferSize + 1; i++) {
       auto note =
-          mustMake<m::runtime::ConsoleAPICalledNotification>(parsedNote);
+          expectNotification<m::runtime::ConsoleAPICalledNotification>(conn);
       EXPECT_EQ(note.args[0].type, "string");
 
       try {
@@ -2430,15 +2449,15 @@ TEST_F(ConnectionTests, testConsoleBuffer) {
         EXPECT_NE((*note.args[0].value).find("discarded"), std::string::npos);
         receivedWarning = true;
       }
-    });
-  }
+    }
 
-  expectNothing(conn);
+    expectNothing(conn);
 
-  for (size_t i = 0; i < kExpectedMaxBufferSize; i++) {
-    EXPECT_TRUE(received[i]);
+    for (size_t i = 0; i < kExpectedMaxBufferSize; i++) {
+      EXPECT_TRUE(received[i]);
+    }
+    EXPECT_TRUE(receivedWarning);
   }
-  EXPECT_TRUE(receivedWarning);
 }
 
 TEST_F(ConnectionTests, testThisObject) {
@@ -2741,7 +2760,7 @@ TEST_F(ConnectionTests, canBreakOnScriptsWithSourceMap) {
   // Continue and verify that the JS code has now executed
   send<m::debugger::ResumeRequest>(conn, msgId++);
   expectNotification<m::debugger::ResumedNotification>(conn);
-  expectNotification<m::debugger::PausedNotification>(conn);
+  expectPaused(conn, "other", {{"global", 1, 1}});
   EXPECT_EQ(asyncRuntime.awaitStoredValue().asNumber(), 42);
 
   // Resume and exit
@@ -2771,7 +2790,7 @@ TEST_F(ConnectionTests, wontStopOnFilesWithoutSourceMaps) {
 
   // Continue and verify that the JS code has now executed without first
   // pausing on the script load.
-  expectNotification<m::debugger::PausedNotification>(conn);
+  expectPaused(conn, "other", {{"global", 1, 1}});
   EXPECT_EQ(asyncRuntime.awaitStoredValue().asNumber(), 42);
 
   // Resume and exit
@@ -2795,7 +2814,7 @@ TEST_F(WaitForDebuggerTests, runIfWaitingForDebugger) {
 
   send<m::debugger::EnableRequest>(conn, ++msgId);
   expectNotification<m::debugger::ScriptParsedNotification>(conn);
-  expectNotification<m::debugger::PausedNotification>(conn);
+  expectPaused(conn, "other", {{"global", 1, 1}});
 
   // We should now be paused on load. Verify that we didn't run code.
   ASSERT_FALSE(asyncRuntime.hasStoredValue());
@@ -2805,7 +2824,7 @@ TEST_F(WaitForDebuggerTests, runIfWaitingForDebugger) {
   expectNotification<m::debugger::ResumedNotification>(conn);
 
   // We should immediately hit the 'debugger;' statement
-  expectNotification<m::debugger::PausedNotification>(conn);
+  expectPaused(conn, "other", {{"global", 1, 1}});
   EXPECT_EQ(1, asyncRuntime.awaitStoredValue().asNumber());
 
   // RunIfWaitingForDebuggerResponse should be accepted but have no effect
@@ -2842,7 +2861,7 @@ TEST_F(ConnectionTests, heapProfilerSampling) {
   expectNotification<m::debugger::ScriptParsedNotification>(conn);
 
   // We should get a pause before the first statement.
-  expectNotification<m::debugger::PausedNotification>(conn);
+  expectPaused(conn, "other", {{"global", 1, 1}});
 
   {
     m::heapProfiler::StartSamplingRequest req;
@@ -2858,7 +2877,7 @@ TEST_F(ConnectionTests, heapProfilerSampling) {
   // Resume, run the allocations, and once it's paused again, stop them.
   send<m::debugger::ResumeRequest>(conn, msgId++);
   expectNotification<m::debugger::ResumedNotification>(conn);
-  expectNotification<m::debugger::PausedNotification>(conn);
+  expectPaused(conn, "other", {{"global", 12, 1}});
   // Send the stop sampling request, expect the value coming back to be JSON.
   auto resp = send<
       m::heapProfiler::StopSamplingRequest,
@@ -2867,6 +2886,77 @@ TEST_F(ConnectionTests, heapProfilerSampling) {
   EXPECT_NE(resp.profile.samples.size(), 0);
   // Don't test the content of the JSON, that is tested via the
   // SamplingHeapProfilerTest.
+
+  // Resume and exit
+  send<m::debugger::ResumeRequest>(conn, msgId++);
+  expectNotification<m::debugger::ResumedNotification>(conn);
+}
+
+TEST_F(ConnectionTests, getHeapUsage) {
+  int msgId = 1;
+
+  send<m::debugger::EnableRequest>(conn, msgId++);
+
+  asyncRuntime.executeScriptAsync(R"(
+    (function main() {
+      var a = [];
+      for (var i = 0; i < 100; i++) {
+        a[i] = new Object;
+      }
+      debugger;
+      print(a); // Keep allocations alive until after the debugger statement.
+    })();
+  )");
+  expectNotification<m::debugger::ScriptParsedNotification>(conn);
+  expectPaused(conn, "other", {{"main", 6, 2}, {"global", 8, 1}});
+
+  m::runtime::GetHeapUsageResponse resp =
+      send<m::runtime::GetHeapUsageRequest, m::runtime::GetHeapUsageResponse>(
+          conn, msgId++);
+  EXPECT_GT(resp.usedSize, 0);
+
+  // Resume and exit
+  send<m::debugger::ResumeRequest>(conn, msgId++);
+  expectNotification<m::debugger::ResumedNotification>(conn);
+}
+
+TEST_F(ConnectionTests, collectGarbage) {
+  int msgId = 1;
+
+  send<m::debugger::EnableRequest>(conn, msgId++);
+
+  asyncRuntime.executeScriptAsync(R"(
+    (function main() {
+      var a = [];
+      for (var i = 0; i < 100; i++) {
+        a[i] = new Object;
+      }
+      debugger;
+      print(a); // Keep allocations alive until after the debugger statement.
+    })();
+    debugger;
+  )");
+  expectNotification<m::debugger::ScriptParsedNotification>(conn);
+  expectPaused(conn, "other", {{"main", 6, 2}, {"global", 8, 1}});
+
+  double before =
+      send<m::runtime::GetHeapUsageRequest, m::runtime::GetHeapUsageResponse>(
+          conn, msgId++)
+          .usedSize;
+
+  send<m::heapProfiler::CollectGarbageRequest>(conn, msgId++);
+
+  // Move to the next debugger statement
+  send<m::debugger::ResumeRequest>(conn, msgId++);
+  expectNotification<m::debugger::ResumedNotification>(conn);
+  expectPaused(conn, "other", {{"global", 9, 1}});
+
+  double after =
+      send<m::runtime::GetHeapUsageRequest, m::runtime::GetHeapUsageResponse>(
+          conn, msgId++)
+          .usedSize;
+
+  EXPECT_LT(after, before);
 
   // Resume and exit
   send<m::debugger::ResumeRequest>(conn, msgId++);
@@ -2886,7 +2976,7 @@ TEST_F(ConnectionTests, heapSnapshotRemoteObject) {
   expectNotification<m::debugger::ScriptParsedNotification>(conn);
 
   // We should get a pause before the first statement.
-  expectNotification<m::debugger::PausedNotification>(conn);
+  expectPaused(conn, "other", {{"global", 2, 1}});
 
   {
     // Take a heap snapshot first to assign IDs.
@@ -2895,7 +2985,8 @@ TEST_F(ConnectionTests, heapSnapshotRemoteObject) {
     req.reportProgress = false;
     // We don't need the response because we can directly query for object IDs
     // from the runtime.
-    send(conn, req);
+    conn.send(req.toJsonStr());
+    expectHeapSnapshot(conn, req.id);
   }
 
   const uint64_t globalObjID = runtime->getUniqueID(runtime->global());
@@ -3021,7 +3112,10 @@ TEST_F(ConnectionTests, testGlobalLexicalScopeNames) {
 
   send<m::debugger::EnableRequest>(conn, msgId++);
   expectNotification<m::debugger::ScriptParsedNotification>(conn);
-  expectNotification<m::debugger::PausedNotification>(conn);
+  expectPaused(
+      conn,
+      "other",
+      {{"func3", 13, 3}, {"func2", 17, 2}, {"func1", 7, 2}, {"global", 20, 1}});
 
   m::runtime::GlobalLexicalScopeNamesRequest req;
   req.id = msgId;
@@ -3042,12 +3136,12 @@ TEST_F(ConnectionTests, testGlobalLexicalScopeNames) {
 TEST_F(ConnectionTests, testInvalidExecutionContext) {
   int msgId = 1;
   send<m::runtime::EnableRequest>(conn, msgId++);
-  send<m::debugger::EnableRequest>(conn, msgId++);
   auto executionContextNotification = expectExecutionContextCreated(conn);
+  send<m::debugger::EnableRequest>(conn, msgId++);
 
   asyncRuntime.executeScriptAsync(R"(debugger;)");
   expectNotification<m::debugger::ScriptParsedNotification>(conn);
-  expectNotification<m::debugger::PausedNotification>(conn);
+  expectPaused(conn, "other", {{"global", 0, 1}});
 
   m::runtime::GlobalLexicalScopeNamesRequest req;
   req.id = msgId;
@@ -3061,7 +3155,33 @@ TEST_F(ConnectionTests, testInvalidExecutionContext) {
   expectNotification<m::debugger::ResumedNotification>(conn);
 }
 
+TEST_F(ConnectionTests, heapSnapshot) {
+  std::shared_ptr<HermesRuntime> runtime = asyncRuntime.runtime();
+  int msgId = 1;
+
+  send<m::debugger::EnableRequest>(conn, msgId++);
+
+  asyncRuntime.executeScriptAsync(R"(
+      while(!shouldStop());
+  )");
+  expectNotification<m::debugger::ScriptParsedNotification>(conn);
+
+  // Request a heap snapshot.
+  m::heapProfiler::TakeHeapSnapshotRequest req;
+  req.id = msgId;
+  req.reportProgress = false;
+  conn.send(req.toJsonStr());
+
+  // Expect the heap snapshot chunks and confirmation, in order.
+  expectHeapSnapshot(conn, req.id);
+
+  // Expect no more chunks are pending.
+  expectNothing(conn);
+
+  asyncRuntime.stop();
+}
+
 } // namespace chrome
-} // namespace inspector
+} // namespace inspector_modern
 } // namespace hermes
 } // namespace facebook
