@@ -8,21 +8,12 @@
  * @format
  */
 
-import {parseForSnapshot, printForSnapshot} from '../__test_utils__/parse';
-
-const parserOpts = {enableExperimentalComponentSyntax: true};
-async function printForSnapshotESTree(code: string) {
-  return printForSnapshot(code, parserOpts);
-}
-async function parseForSnapshotESTree(code: string) {
-  return parseForSnapshot(code, parserOpts);
-}
-async function printForSnapshotBabel(code: string) {
-  return printForSnapshot(code, {babel: true, ...parserOpts});
-}
-async function parseForSnapshotBabel(code: string) {
-  return parseForSnapshot(code, {babel: true, ...parserOpts});
-}
+import {
+  printForSnapshotESTree,
+  parseForSnapshotESTree,
+  printForSnapshotBabel,
+  parseForSnapshotBabel,
+} from '../__test_utils__/parse';
 
 describe('ComponentDeclaration', () => {
   describe('Basic', () => {
@@ -143,7 +134,8 @@ describe('ComponentDeclaration', () => {
 
   describe('rest params', () => {
     const code = `
-      component Foo(...props: Props) {}
+component Foo(...props: Props) {}
+component Foo(...{prop}: Props) {}
     `;
 
     test('ESTree', async () => {
@@ -153,9 +145,13 @@ describe('ComponentDeclaration', () => {
 
     test('Babel', async () => {
       expect(await parseForSnapshotBabel(code)).toMatchSnapshot();
-      expect(await printForSnapshotBabel(code)).toMatchInlineSnapshot(
-        `"function Foo(props: $ReadOnly<{...}>): React.Node {}"`,
-      );
+      expect(await printForSnapshotBabel(code)).toMatchInlineSnapshot(`
+        "function Foo(props: $ReadOnly<{...}>): React.Node {}
+
+        function Foo({
+          prop
+        }: $ReadOnly<{...}>): React.Node {}"
+      `);
     });
   });
 

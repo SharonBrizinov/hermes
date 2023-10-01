@@ -21,6 +21,7 @@
 #include <hermes/inspector/chrome/CDPHandler.h>
 
 namespace fbhermes = ::facebook::hermes;
+using CDPHandler = fbhermes::inspector_modern::chrome::CDPHandler;
 
 static const char *usageMessage = R"(hermes-chrome-debug-server script.js
 
@@ -111,14 +112,14 @@ static std::string getUrl(const char *path) {
 }
 
 static void runDebuggerLoop(
-    fbhermes::inspector::chrome::CDPHandler &cdpHandler,
+    std::shared_ptr<CDPHandler> cdpHandler,
     std::string scriptSource) {
-  cdpHandler.registerCallback(&sendResponse);
+  cdpHandler->registerCallbacks(&sendResponse, {});
 
   std::string line;
   while (std::getline(std::cin, line)) {
     logRequest(line);
-    cdpHandler.handle(line);
+    cdpHandler->handle(line);
   }
 }
 
@@ -128,9 +129,10 @@ static void runScript(const std::string &scriptSource, const std::string &url) {
                                       .withEnableSampleProfiling(true)
                                       .build()));
   auto adapter =
-      std::make_unique<fbhermes::inspector::SharedRuntimeAdapter>(runtime);
-  fbhermes::inspector::chrome::CDPHandler cdpHandler(
-      std::move(adapter), "hermes-chrome-debug-server");
+      std::make_unique<fbhermes::inspector_modern::SharedRuntimeAdapter>(
+          runtime);
+  std::shared_ptr<CDPHandler> cdpHandler =
+      CDPHandler::create(std::move(adapter), "hermes-chrome-debug-server");
   std::thread debuggerLoop(runDebuggerLoop, std::ref(cdpHandler), scriptSource);
 
   fbhermes::HermesRuntime::DebugFlags flags{};

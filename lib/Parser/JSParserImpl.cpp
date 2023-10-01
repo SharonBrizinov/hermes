@@ -127,6 +127,9 @@ void JSParserImpl::initializeIdentifiers() {
 
   namespaceIdent_ = lexer_.getIdentifier("namespace");
   readonlyIdent_ = lexer_.getIdentifier("readonly");
+  neverIdent_ = lexer_.getIdentifier("never");
+  undefinedIdent_ = lexer_.getIdentifier("undefined");
+  unknownIdent_ = lexer_.getIdentifier("unknown");
 
 #endif
 
@@ -1087,7 +1090,7 @@ Optional<ESTree::PrivateNameNode *> JSParserImpl::parsePrivateName() {
       tok_,
       new (context_)
           ESTree::IdentifierNode(tok_->getPrivateIdentifier(), nullptr, false));
-  SMLoc start = advance().Start;
+  SMLoc start = advance(JSLexer::GrammarContext::AllowDiv).Start;
   return setLocation(
       start, ident, new (context_) ESTree::PrivateNameNode(ident));
 }
@@ -4099,7 +4102,7 @@ Optional<ESTree::Node *> JSParserImpl::parseBinaryExpression(Param param) {
             tok_,
             new (context_) ESTree::IdentifierNode(
                 tok_->getPrivateIdentifier(), nullptr, false))));
-    advance();
+    advance(JSLexer::GrammarContext::AllowDiv);
     unsigned prevPrec = stack.empty() ? 0 : getPrecedence(stack.back().opKind);
     // Check the precedence of the previous operator on the stack if it exists.
     // If prevPrec is higher precedence than `in`, the private name will end
@@ -6722,6 +6725,9 @@ Optional<ESTree::Node *> JSParserImpl::parseExportDeclaration() {
         new (context_) ESTree::ExportNamedDeclarationNode(
             nullptr, std::move(specifiers), source, valueIdent_));
   } else if (check(TokenKind::rw_var)) {
+    // Could find another AssignmentExpression without hitting
+    // PrimaryExpression.
+    CHECK_RECURSION;
     // export VariableStatement
     auto optVar = parseVariableStatement(Param{});
     if (!optVar) {

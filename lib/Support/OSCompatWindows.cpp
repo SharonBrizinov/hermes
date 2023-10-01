@@ -391,8 +391,13 @@ uint64_t process_id() {
   return GetCurrentProcessId();
 }
 
-uint64_t thread_id() {
+uint64_t global_thread_id() {
   return GetCurrentThreadId();
+}
+
+std::pair<const void *, size_t> thread_stack_bounds(unsigned) {
+  // Native stack checking unsupported on Windows.
+  return {nullptr, 0};
 }
 
 void set_thread_name(const char *name) {

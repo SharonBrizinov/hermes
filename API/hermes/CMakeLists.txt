@@ -8,6 +8,8 @@ add_hermes_library(compileJS CompileJS.cpp LINK_LIBS hermesPublic)
 
 if(HERMES_ENABLE_DEBUGGER)
   add_subdirectory(inspector)
+  set(INSPECTOR_API_SOURCES inspector/RuntimeAdapter.cpp inspector/chrome/CDPHandler.cpp)
+  set(INSPECTOR_DEPS hermesInspector_rtti_exception)
 endif()
 
 set(HERMES_ENABLE_EH ON)
@@ -19,9 +21,12 @@ add_hermes_library(synthTraceParser SynthTraceParser.cpp LINK_LIBS hermesSupport
 # All remaining targets in this file use both exceptions and RTTI.
 set(HERMES_ENABLE_RTTI ON)
 
+# List the files that define exported functions explicitly, and they can link
+# against the internal functionality they need.
 set(api_sources
   hermes.cpp
   DebuggerAPI.cpp
+  ${INSPECTOR_API_SOURCES}
   )
 
 file(GLOB api_headers ${CMAKE_CURRENT_SOURCE_DIR}/*.h)
@@ -29,8 +34,15 @@ file(GLOB api_public_headers ${PROJECT_SOURCE_DIR}/public/hermes/Public/*.h)
 
 add_hermes_library(hermesapi
         ${api_sources}
-        LINK_LIBS jsi hermesVMRuntime)
+        LINK_LIBS jsi hermesVMRuntime ${INSPECTOR_DEPS})
 target_include_directories(hermesapi PUBLIC ..)
+
+if(HERMES_THREAD_SAFETY_ANALYSIS)
+  if("${CMAKE_CXX_COMPILER_ID}" MATCHES "Clang")
+    set_property(SOURCE inspector/chrome/CDPHandler.cpp APPEND_STRING PROPERTY
+      COMPILE_FLAGS "-Wthread-safety -Werror=thread-safety-analysis -D_LIBCPP_ENABLE_THREAD_SAFETY_ANNOTATIONS")
+  endif()
+endif()
 
 add_hermes_library(hermesapiLean
         ${api_sources}
@@ -47,19 +59,7 @@ add_hermes_library(traceInterpreter TraceInterpreter.cpp
 
 set(HERMES_LINK_COMPONENTS LLVHSupport)
 
-set(LIBHERMES_INSPECTOR_OBJS)
-if(HERMES_ENABLE_DEBUGGER)
-  set(LIBHERMES_INSPECTOR_OBJS
-    $<TARGET_OBJECTS:hermesInspector_no_rtti_no_exception_obj>
-    $<TARGET_OBJECTS:hermesInspector_rtti_exception_obj>
-  )
-endif()
-
-add_library(libhermes
-  SHARED
-  ${api_sources}
-  ${LIBHERMES_INSPECTOR_OBJS}
-)
+add_library(libhermes SHARED ${api_sources})
 
 # This is configured using a cmake flag instead of a separate target, because
 # we need the output to be named "libhermes.so".
@@ -72,6 +72,7 @@ target_link_libraries(libhermes
   PRIVATE
   jsi
   ${LIBHERMES_VM_DEP}
+  ${INSPECTOR_DEPS}
 )
 target_link_options(libhermes PRIVATE ${HERMES_EXTRA_LINKER_FLAGS})
 

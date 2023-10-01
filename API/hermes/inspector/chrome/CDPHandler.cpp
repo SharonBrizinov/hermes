@@ -28,18 +28,20 @@
 #include <hermes/inspector/chrome/MessageConverters.h>
 #include <hermes/inspector/chrome/RemoteObjectConverters.h>
 #include <hermes/inspector/chrome/RemoteObjectsTable.h>
+#include <hermes/inspector/chrome/ThreadSafetyAnalysis.h>
 #include <jsi/instrumentation.h>
+#include <llvh/ADT/ScopeExit.h>
 
 namespace facebook {
 namespace hermes {
-namespace inspector {
+namespace inspector_modern {
 namespace chrome {
 
 using namespace ::hermes::parser;
 
 namespace debugger = ::facebook::hermes::debugger;
-namespace inspector = ::facebook::hermes::inspector;
-namespace m = ::facebook::hermes::inspector::chrome::message;
+namespace inspector_modern = ::facebook::hermes::inspector_modern;
+namespace m = ::facebook::hermes::inspector_modern::chrome::message;
 
 static const char *const kVirtualBreakpointPrefix = "virtualbreakpoint-";
 static const char *const kBeforeScriptWithSourceMapExecution =
@@ -48,7 +50,10 @@ static const char *const kUserEnteredScriptPrefix = "userScript";
 static const char *const kDebuggerEnableMethod = "Debugger.enable";
 static const char *const kDebuggerMethodPrefix = "Debugger";
 
-static const int kMaxPendingConsoleMessages = 1000;
+/// Controls the max number of message to cached in \p consoleMessageCache_. The
+/// value here is chosen to match what Chromium uses in their CDP
+/// implementation.
+static const int kMaxCachedConsoleMessages = 1000;
 
 struct Script {
   uint32_t fileId{};
@@ -92,8 +97,14 @@ enum Execution {
  * CDPHandler::Impl
  */
 
+/// Impl inherits from enable_shared_from_this in order to properly support
+/// console logging. We will insert host functions which may outlive the
+/// lifetime of an instance of Impl. In order to guard against using class
+/// members of an instance that has been de-allocated, we use weak pointers
+/// constructed from this.
 class CDPHandler::Impl : public message::RequestHandler,
-                         public debugger::EventObserver {
+                         public debugger::EventObserver,
+                         public std::enable_shared_from_this<CDPHandler::Impl> {
  public:
   Impl(
       std::unique_ptr<RuntimeAdapter> adapter,
@@ -101,12 +112,18 @@ class CDPHandler::Impl : public message::RequestHandler,
       bool waitForDebugger);
   ~Impl() override;
 
-  HermesRuntime &getRuntime();
   std::string getTitle() const;
 
-  bool registerCallback(CallbackFunction callback);
-  void unregisterCallback();
+  bool registerCallbacks(
+      CDPMessageCallbackFunction msgCallback,
+      OnUnregisterFunction onUnregister);
+  bool unregisterCallbacks();
   void handle(std::string str);
+  /// Install console log handler. This is to detect console.XXX methods, and
+  /// then emit the corresponding Runtime.consoleAPICalled event. Callers of
+  /// this function must ensure that the instance has already had a shared_ptr
+  /// constructed to hold this instance.
+  void installLogHandler();
 
   /* RequestHandler overrides */
   void handle(const m::UnknownRequest &req) override;
@@ -153,7 +170,7 @@ class CDPHandler::Impl : public message::RequestHandler,
   }
 
   debugger::Debugger &getDebugger() {
-    return runtimeAdapter_->getRuntime().getDebugger();
+    return runtime_.getDebugger();
   }
 
   // Whether we started with pauseOnFirstStatement, and have not yet had a
@@ -188,11 +205,18 @@ class CDPHandler::Impl : public message::RequestHandler,
   // Check what script has just finished parsing, and add it to the appropriate
   // data structures. This does not send any notifications.
   void processCurrentScriptLoaded();
-  // Iterate over all the scripts we have already seen as parsed, and
-  // potentially notify the client about them.
+  // If a client is attached, send notifications for any scripts that the
+  // client hasn't been notified about yet.
   void processPendingScriptLoads();
   Script getScriptFromTopCallFrame();
   debugger::Command didPause(debugger::Debugger &debugger) override;
+  /// Wait for more work to arrive. The specified lock (on \p mutex_) will be
+  /// temporarily released (by waiting on the condition variable \p signal_),
+  /// allowing other threads to enqueue work. This requires \p mutex_ to be
+  /// locked exactly once before calling, otherwise \p mutex_ won't be fully
+  /// released, and the new work being awaited can never arrive.
+  void waitForAsyncPauseTrigger(std::unique_lock<std::recursive_mutex> &lock)
+      TSA_NO_THREAD_SAFETY_ANALYSIS;
 
   template <typename T>
   void setHermesLocation(
@@ -229,21 +253,18 @@ class CDPHandler::Impl : public message::RequestHandler,
 
   template <typename R>
   void enqueueDesiredAttachment(const R &req, Attachment attachment) {
-    std::lock_guard<std::mutex> lock(mutex_);
     pendingDesiredAttachments_.push({req.id, attachment});
     triggerAsyncPause();
   }
 
   template <typename R>
   void enqueueDesiredStep(const R &req, debugger::StepMode step) {
-    std::lock_guard<std::mutex> lock(mutex_);
     pendingDesiredSteps_.push({req.id, step});
     triggerAsyncPause();
   }
 
   template <typename R>
   void enqueueDesiredExecution(const R &req, Execution execution) {
-    std::lock_guard<std::mutex> lock(mutex_);
     pendingDesiredExecutions_.push({req.id, execution});
   }
 
@@ -275,12 +296,28 @@ class CDPHandler::Impl : public message::RequestHandler,
       int id,
       std::optional<m::runtime::ExecutionContextId> context);
 
-  // Emit a Runtime.consoleAPICalled event to the debug client.
-  void emitConsoleAPICalledEvent(ConsoleMessageInfo info);
-  void storePendingConsoleMessage(ConsoleMessageInfo info);
-  // Install console log handler. This is to detect console.XXX methods, and
-  // then emit the corresponding Runtime.consoleAPICalled event.
-  void installLogHandler();
+  /// Function to process a console message being logged. It will invoke
+  /// \p sendConsoleAPICalledEventToClient to actually send the CDP message, and
+  /// use \p cacheConsoleMessage to deal with caching the message. The function
+  /// takes ConsoleMessageInfo by-value for the following reasons:
+  /// 1. Ease of use with temporary objects. It can't be a const reference
+  ///    because the data is to be stored into a cache later.
+  /// 2. Need to store data into a cache. See \p cacheConsoleMessage.
+  void handleConsoleAPI(ConsoleMessageInfo info);
+  /// Sends a Runtime.consoleAPICalled CDP event to the debug client. Generally
+  /// code should not directly use this function and should use
+  /// \p handleConsoleAPI. The only place where it makes sense to directly call
+  /// this function is when handling Runtime.enable.
+  void sendConsoleAPICalledEventToClient(const ConsoleMessageInfo &info);
+  /// Stores the provided console message in the cache and handles when the
+  /// cache is full. When storing things in a cache, if a copy is stored instead
+  /// of pointer, then the cache is less likely to have accidental modification
+  /// later. Also, the data's lifetime is correlated to the cache instead of
+  /// something else. In this case, the function takes ConsoleMessageInfo
+  /// by-value to ensure a copy of the data is received or the ownership is
+  /// moved to the function. Since ConsoleMessageInfo has no copy constructor, a
+  /// move will be used.
+  void cacheConsoleMessage(ConsoleMessageInfo info);
   // Install a host function for a particular console method. This takes a
   // reference to the original console object, so calls can still be forwarded
   // to that object.
@@ -291,8 +328,15 @@ class CDPHandler::Impl : public message::RequestHandler,
       const std::string &chromeTypeDefault = "");
   double currentTimestampMs();
 
-  std::shared_ptr<RuntimeAdapter> runtimeAdapter_;
-  std::string title_;
+  std::unique_ptr<RuntimeAdapter> runtimeAdapter_;
+  /// Cached reference to the runtime, fetched from the \p RuntimeAdapter. The
+  /// \p RuntimeAdapter implementor is required to keep the runtime alive for
+  /// the duration of the CDP Handler, so we can safely keep this reference.
+  /// The reference is cached here so it can be accessed from arbitrary threads
+  /// inside the CDP Handler without requiring \p RuntimeAdapter::getRuntime
+  /// to support use from arbitrary threads.
+  HermesRuntime &runtime_;
+  const std::string title_;
 
   // preparedScripts_ stores user-entered scripts that have been prepared for
   // execution, and may be invoked by a later command.
@@ -300,20 +344,17 @@ class CDPHandler::Impl : public message::RequestHandler,
 
   // Some events are represented as a mode in Hermes but a breakpoint in CDP,
   // e.g. "beforeScriptExecution" and "beforeScriptWithSourceMapExecution".
-  // Keep track of these separately. The caller should lock the
-  // virtualBreakpointMutex_.
-  std::mutex virtualBreakpointMutex_;
+  // Keep track of these separately.
   uint32_t nextVirtualBreakpoint_ = 1;
   const std::string &createVirtualBreakpoint(const std::string &category);
   bool isVirtualBreakpointId(const std::string &id);
   bool hasVirtualBreakpoint(const std::string &category);
   bool removeVirtualBreakpoint(const std::string &id);
   std::unordered_map<std::string, std::unordered_set<std::string>>
-      virtualBreakpoints_;
+      virtualBreakpoints_ TSA_GUARDED_BY(mutex_);
 
-  // callback_ is protected by callbackMutex_.
-  std::mutex callbackMutex_;
-  CallbackFunction callback_;
+  CDPMessageCallbackFunction msgCallback_ TSA_GUARDED_BY(mutex_);
+  OnUnregisterFunction onUnregister_;
 
   // objTable_ is protected by the inspector lock. It should only be accessed
   // when the VM is paused, e.g. in an InspectorObserver callback or in an
@@ -321,23 +362,51 @@ class CDPHandler::Impl : public message::RequestHandler,
   RemoteObjectsTable objTable_;
 
   bool breakpointsActive_ = true;
+  /// Tracks whether we are already in a didPause callback to detect recursive
+  /// calls to didPause.
+  bool inDidPause_ = false;
 
-  // Unguarded
+  /// Track whether heap object stack trace collection is active (i.e.
+  /// \p startTrackingHeapObjectStackTraces has been called without a
+  /// corresponding \p stopTrackingHeapObjectStackTraces).
+  bool trackingHeapObjectStackTraces_ = false;
+
   Attachment currentAttachment_ = Attachment::None;
   Execution currentExecution_ = Execution::Running;
   std::unordered_map<int, Script> loadedScripts_;
   std::unordered_map<std::string, int> loadedScriptIdByName_;
   bool runtimeEnabled_ = false;
-  int numPendingConsoleMessagesDiscarded_ = 0;
-  std::deque<ConsoleMessageInfo> pendingConsoleMessages_;
 
-  // Guarded by mutex
-  std::mutex mutex_;
-  std::queue<std::pair<int, Execution>> pendingDesiredExecutions_;
-  std::queue<std::pair<int, Attachment>> pendingDesiredAttachments_;
-  std::queue<std::pair<int, debugger::StepMode>> pendingDesiredSteps_;
-  bool awaitingDebuggerOnStart_;
-  std::condition_variable signal_;
+  /// Counts the number of console messages discarded when
+  /// \p consoleMessageCache_ is full.
+  int numConsoleMessagesDiscardedFromCache_ = 0;
+  /// Cache for storing console messages. Earlier messages are discarded when
+  /// the cache is full. The choice to use a std::deque is for fast operations
+  /// at the beginning and the end, so that adding to the cache and discarding
+  /// from the cache are fast.
+  std::deque<ConsoleMessageInfo> consoleMessageCache_;
+
+  /// \p mutex_ protects all members; any entry point to the CDPHandler from
+  /// external code should lock this mutex. The mutex is recursive, as the
+  /// CDP handler may be re-entered in a specific circumstance: the \p didPause
+  /// handler (which requires the lock) may invoke the runtime, which may
+  /// trigger the \p startTrackingHeapObjectStackTraces callback (which also
+  /// requires the lock). The \p recursive_mutex allows the mutex to be locked
+  /// multiple times on the same thread (the runtime thread) without
+  /// deadlocking.
+  std::recursive_mutex mutex_;
+  std::queue<std::pair<int, Execution>> pendingDesiredExecutions_
+      TSA_GUARDED_BY(mutex_);
+  std::queue<std::pair<int, Attachment>> pendingDesiredAttachments_
+      TSA_GUARDED_BY(mutex_);
+  std::queue<std::pair<int, debugger::StepMode>> pendingDesiredSteps_
+      TSA_GUARDED_BY(mutex_);
+  bool awaitingDebuggerOnStart_ TSA_GUARDED_BY(mutex_);
+  /// \p signal_ is used to allow the runtime thread to await another command
+  /// from a non-runtime thread, temporarily releasing \p mutex_ while waiting.
+  /// This is a \p condition_variable_any (rather than a \p condition_variable)
+  /// for compatiblity with the \p recursive_mutex \p mutex_.
+  std::condition_variable_any signal_;
   struct PendingEvalReq {
     long long id;
     uint32_t frameIdx;
@@ -350,9 +419,9 @@ class CDPHandler::Impl : public message::RequestHandler,
         const facebook::hermes::debugger::EvalResult &)>>
         onEvalCompleteCallback;
   };
-  std::queue<PendingEvalReq> pendingEvals_;
+  std::queue<PendingEvalReq> pendingEvals_ TSA_GUARDED_BY(mutex_);
   std::queue<std::function<void(const debugger::ProgramState &state)>>
-      pendingFuncs_;
+      pendingFuncs_ TSA_GUARDED_BY(mutex_);
 };
 
 CDPHandler::Impl::Impl(
@@ -360,48 +429,64 @@ CDPHandler::Impl::Impl(
     const std::string &title,
     bool waitForDebugger)
     : runtimeAdapter_(std::move(adapter)),
+      runtime_(runtimeAdapter_->getRuntime()),
       title_(title),
       awaitingDebuggerOnStart_(waitForDebugger) {
   // Install __tickleJs. Do this activity before the call to setEventObserver,
   // so we don't get any didPause callback firings for these.
   std::string src = "function __tickleJs() { return Math.random(); }";
-  runtimeAdapter_->getRuntime().evaluateJavaScript(
+  runtime_.evaluateJavaScript(
       std::make_shared<jsi::StringBuffer>(src), "__tickleJsHackUrl");
-  installLogHandler();
-  runtimeAdapter_->getRuntime().getDebugger().setShouldPauseOnScriptLoad(true);
-  runtimeAdapter_->getRuntime().getDebugger().setEventObserver(this);
+  runtime_.getDebugger().setShouldPauseOnScriptLoad(true);
+  runtime_.getDebugger().setEventObserver(this);
 }
 
 CDPHandler::Impl::~Impl() {
-  unregisterCallback();
+  unregisterCallbacks();
+
+  runtime_.getDebugger().setEventObserver(nullptr);
+
+  if (trackingHeapObjectStackTraces_) {
+    runtime_.instrumentation().stopTrackingHeapObjectStackTraces();
+  }
 
   // TODO(T161620474): Properly clean up all the other variables being protected
   // by other mutex
 }
 
-HermesRuntime &CDPHandler::Impl::getRuntime() {
-  return runtimeAdapter_->getRuntime();
-}
-
 std::string CDPHandler::Impl::getTitle() const {
+  // This is a public function, but the mutex is not required
+  // as we're just returning member that is unchanged for the
+  // lifetime of this instance.
   return title_;
 }
 
-bool CDPHandler::Impl::registerCallback(CallbackFunction callback) {
-  assert(callback);
-  std::lock_guard<std::mutex> lock(callbackMutex_);
+bool CDPHandler::Impl::registerCallbacks(
+    CDPMessageCallbackFunction msgCallback,
+    OnUnregisterFunction onUnregister) {
+  assert(msgCallback);
+  // Lock because this is a public function that manipulates members.
+  std::lock_guard<std::recursive_mutex> lock(mutex_);
 
-  if (callback_) {
+  if (msgCallback_ || onUnregister_) {
     return false;
   }
 
-  callback_ = callback;
+  msgCallback_ = msgCallback;
+  onUnregister_ = onUnregister;
   return true;
 }
 
-void CDPHandler::Impl::unregisterCallback() {
-  std::lock_guard<std::mutex> lock(callbackMutex_);
-  callback_ = nullptr;
+bool CDPHandler::Impl::unregisterCallbacks() {
+  // Lock because this is a public function that manipulates members.
+  std::lock_guard<std::recursive_mutex> lock(mutex_);
+  bool hadCallback = msgCallback_ != nullptr;
+  msgCallback_ = nullptr;
+  if (onUnregister_) {
+    onUnregister_();
+  }
+  onUnregister_ = nullptr;
+  return hadCallback;
 }
 
 static bool isDebuggerRequest(const m::Request &req) {
@@ -416,6 +501,9 @@ void CDPHandler::Impl::handle(std::string str) {
     return;
   }
 
+  // Lock because this is a public function that manipulates members.
+  std::lock_guard<std::recursive_mutex> lock(mutex_);
+
   // If the debugger is currently disabled and the incoming method is for
   // the debugger, then error out to the request immediately here. We make
   // an exception for Debugger.enable though, otherwise we would never be
@@ -429,23 +517,26 @@ void CDPHandler::Impl::handle(std::string str) {
   }
 }
 
-void CDPHandler::Impl::emitConsoleAPICalledEvent(ConsoleMessageInfo info) {
-  // buffer console messages before devtool connects
-  if (!runtimeEnabled_) {
-    storePendingConsoleMessage(std::move(info));
-    return;
+void CDPHandler::Impl::handleConsoleAPI(ConsoleMessageInfo info) {
+  if (runtimeEnabled_) {
+    sendConsoleAPICalledEventToClient(info);
   }
 
+  cacheConsoleMessage(std::move(info));
+}
+
+void CDPHandler::Impl::sendConsoleAPICalledEventToClient(
+    const ConsoleMessageInfo &info) {
   m::runtime::ConsoleAPICalledNotification apiCalledNote;
   apiCalledNote.type = info.level;
   apiCalledNote.timestamp = info.timestamp;
   apiCalledNote.executionContextId = kHermesExecutionContextId;
 
-  size_t argsSize = info.args.size(getRuntime());
+  size_t argsSize = info.args.size(runtime_);
   for (size_t index = 0; index < argsSize; ++index) {
     apiCalledNote.args.push_back(m::runtime::makeRemoteObject(
-        getRuntime(),
-        info.args.getValueAtIndex(getRuntime(), index),
+        runtime_,
+        info.args.getValueAtIndex(runtime_, index),
         objTable_,
         "ConsoleObjectGroup",
         false,
@@ -455,30 +546,23 @@ void CDPHandler::Impl::emitConsoleAPICalledEvent(ConsoleMessageInfo info) {
   sendNotificationToClient(apiCalledNote);
 }
 
-void CDPHandler::Impl::storePendingConsoleMessage(ConsoleMessageInfo info) {
-  assert(pendingConsoleMessages_.size() <= kMaxPendingConsoleMessages);
+void CDPHandler::Impl::cacheConsoleMessage(ConsoleMessageInfo info) {
+  assert(consoleMessageCache_.size() <= kMaxCachedConsoleMessages);
 
-  // Unfortunately we can't have unlimited buffer space, so there will be
-  // situations when we run out of storage. We could either discard earlier
-  // messages, or discard later messages. What's more useful depends on how the
-  // client's app is written, and whether the useful logs happen earlier or
-  // later.
-  //
-  // Chromium's implementation discards the earlier messages.
-  //
-  // Since this is a new feature for us, opting to match Chromium's behavior for
-  // two reasons:
-  // 1. Provide a consistent behavior between devtool environments
-  // 2. Assuming that Chromium has better insight into which approach is more
-  //    desirable
-  if (pendingConsoleMessages_.size() == kMaxPendingConsoleMessages) {
+  // There will be situations when we run out of storage due to limited cache
+  // space. This message cache is used to collect console messages before the
+  // first devtool connection. The cache is also used if the devtool re-opens
+  // and needs restore the previous context as much as possible. This is why the
+  // cache will discard earlier messages if max storage is reached. Keeping the
+  // most recent messages makes sense when restoring the context.
+  if (consoleMessageCache_.size() == kMaxCachedConsoleMessages) {
     // Increment a counter so we can inform users how many messages were
     // discarded.
-    numPendingConsoleMessagesDiscarded_++;
-    pendingConsoleMessages_.pop_front();
+    numConsoleMessagesDiscardedFromCache_++;
+    consoleMessageCache_.pop_front();
   }
 
-  pendingConsoleMessages_.push_back(std::move(info));
+  consoleMessageCache_.push_back(std::move(info));
 }
 
 double CDPHandler::Impl::currentTimestampMs() {
@@ -507,7 +591,6 @@ void CDPHandler::Impl::handle(const m::debugger::EnableRequest &req) {
 void CDPHandler::Impl::handle(
     const m::debugger::EvaluateOnCallFrameRequest &req) {
   {
-    std::lock_guard<std::mutex> lock(mutex_);
     pendingEvals_.push(
         {req.id,
          (uint32_t)atoi(req.callFrameId.c_str()),
@@ -529,7 +612,8 @@ void CDPHandler::Impl::sendSnapshot(
     // Stop taking any new traces before sending out the heap
     // snapshot.
     if (stopStackTraceCapture) {
-      getRuntime().instrumentation().stopTrackingHeapObjectStackTraces();
+      runtime_.instrumentation().stopTrackingHeapObjectStackTraces();
+      trackingHeapObjectStackTraces_ = false;
     }
 
     if (reportProgress) {
@@ -544,17 +628,27 @@ void CDPHandler::Impl::sendSnapshot(
       sendNotificationToClient(note);
     }
 
-    // Size picked to conform to Chrome's own implementation, at the
-    // time of writing.
-    inspector::chrome::CallbackOStream cos(
-        /* sz */ 100 << 10, [this](std::string s) {
-          m::heapProfiler::AddHeapSnapshotChunkNotification note;
-          note.chunk = std::move(s);
-          sendNotificationToClient(note);
-          return true;
-        });
+    // The CallbackOStream buffers data and invokes the callback whenever
+    // the chunk size is reached. It can also invoke the callback once more
+    // upon destruction, emitting the final partially-filled chunk. Make sure
+    // the stream goes out of scope and the final chunk is emitted before
+    // sending the OK response.
+    {
+      // Size picked to conform to Chrome's own implementation, at the
+      // time of writing.
+      inspector_modern::chrome::CallbackOStream cos(
+          /* sz */ 100 << 10, [this](std::string s) {
+            // No need to lock the mutex_, as this callback won't be invoked
+            // at a later time when the lock may not be held. The callback is
+            // owned by cos, which is destroyed when the containing scope ends.
+            m::heapProfiler::AddHeapSnapshotChunkNotification note;
+            note.chunk = std::move(s);
+            sendNotificationToClient(note);
+            return true;
+          });
 
-    getRuntime().instrumentation().createSnapshotToStream(cos);
+      runtime_.instrumentation().createSnapshotToStream(cos);
+    }
     sendResponseToClient(m::makeOkResponse(reqId));
   });
 }
@@ -573,11 +667,16 @@ void CDPHandler::Impl::handle(
   // TODO: Convert
   enqueueFunc([this, req]() {
     // const auto id = req.id;
-    getRuntime().instrumentation().startTrackingHeapObjectStackTraces(
+    runtime_.instrumentation().startTrackingHeapObjectStackTraces(
         [this](
             uint64_t lastSeenObjectId,
             std::chrono::microseconds timestamp,
             std::vector<jsi::Instrumentation::HeapStatsUpdate> stats) {
+          // Lock because this is a callback that manipulates members. The
+          // runtime may call this callback any time JavaScript is running,
+          // which can be triggered from a didPause callback.
+          std::lock_guard<std::recursive_mutex> lock(mutex_);
+
           // Send the last object ID notification first.
           m::heapProfiler::LastSeenObjectIdNotification note;
           note.lastSeenObjectId = lastSeenObjectId;
@@ -608,8 +707,7 @@ void CDPHandler::Impl::handle(
           // there's a huge amount of allocation and freeing.
           sendNotificationToClient(heapStatsNote);
         });
-    // At this point we need the equivalent of a setInterval, where
-    // each interval samples the existing
+    trackingHeapObjectStackTraces_ = true;
     sendResponseToClient(m::makeOkResponse(req.id));
   });
 }
@@ -633,7 +731,7 @@ void CDPHandler::Impl::handle(
 
   // TODO: IfEnabled
   enqueueFunc([this, req, samplingInterval]() {
-    getRuntime().instrumentation().startHeapSampling(samplingInterval);
+    runtime_.instrumentation().startHeapSampling(samplingInterval);
     sendResponseToClient(m::makeOkResponse(req.id));
   });
 }
@@ -642,7 +740,7 @@ void CDPHandler::Impl::handle(const m::heapProfiler::StopSamplingRequest &req) {
   // TODO: IfEnabled
   enqueueFunc([this, req]() {
     std::ostringstream stream;
-    getRuntime().instrumentation().stopHeapSampling(stream);
+    runtime_.instrumentation().stopHeapSampling(stream);
 
     m::heapProfiler::StopSamplingResponse resp;
     auto profile = m::heapProfiler::makeSamplingHeapProfile(stream.str());
@@ -658,7 +756,7 @@ void CDPHandler::Impl::handle(const m::heapProfiler::StopSamplingRequest &req) {
 void CDPHandler::Impl::handle(
     const m::heapProfiler::CollectGarbageRequest &req) {
   enqueueFunc([this, req]() {
-    getRuntime().instrumentation().collectGarbage("inspector");
+    runtime_.instrumentation().collectGarbage("inspector");
     sendResponseToClient(m::makeOkResponse(req.id));
   });
 }
@@ -669,14 +767,14 @@ void CDPHandler::Impl::handle(
     uint64_t objID = atoi(req.objectId.c_str());
     std::optional<std::string> group = req.objectGroup;
     auto remoteObjPtr = std::make_shared<m::runtime::RemoteObject>();
-    jsi::Runtime *rt = &getRuntime();
+    jsi::Runtime *rt = &runtime_;
     if (auto *hermesRT = dynamic_cast<HermesRuntime *>(rt)) {
       jsi::Value val = hermesRT->getObjectForID(objID);
       if (val.isNull()) {
         return;
       }
       *remoteObjPtr = m::runtime::makeRemoteObject(
-          getRuntime(), val, objTable_, group.value_or(""), false, false);
+          runtime_, val, objTable_, group.value_or(""), false, false);
     }
     if (!remoteObjPtr->type.empty()) {
       m::heapProfiler::GetObjectByHeapObjectIdResponse resp;
@@ -696,7 +794,7 @@ void CDPHandler::Impl::handle(
     // TODO: de-shared_ptr this
     std::shared_ptr<uint64_t> snapshotID = std::make_shared<uint64_t>(0);
     if (const jsi::Value *valuePtr = objTable_.getValue(req.objectId)) {
-      jsi::Runtime *rt = &getRuntime();
+      jsi::Runtime *rt = &runtime_;
       if (auto *hermesRT = dynamic_cast<HermesRuntime *>(rt)) {
         *snapshotID = hermesRT->getUniqueID(*valuePtr);
       }
@@ -726,7 +824,7 @@ void CDPHandler::Impl::handle(const m::profiler::StartRequest &req) {
 
 void CDPHandler::Impl::handle(const m::profiler::StopRequest &req) {
   enqueueFunc([this, req]() {
-    HermesRuntime *hermesRT = &getRuntime();
+    HermesRuntime *hermesRT = &runtime_;
 
     HermesRuntime::disableSamplingProfiler();
 
@@ -1022,7 +1120,6 @@ void CDPHandler::Impl::handle(const m::runtime::CallFunctionOnRequest &req) {
   // std::function needs a copy-able type.
   auto sharedRunner = std::make_shared<CallFunctionOnRunner>(std::move(runner));
   {
-    std::lock_guard<std::mutex> lock(mutex_);
     pendingEvals_.push(
         {req.id,
          0, // top of the stackframe
@@ -1042,8 +1139,8 @@ void CDPHandler::Impl::handle(const m::runtime::CallFunctionOnRequest &req) {
            }
 
            *remoteObjPtr = m::runtime::makeRemoteObject(
-               getRuntime(),
-               (*sharedRunner)(getRuntime(), objTable_, evalResult),
+               runtime_,
+               (*sharedRunner)(runtime_, objTable_, evalResult),
                objTable_,
                objectGroup,
                byValue,
@@ -1066,7 +1163,7 @@ void CDPHandler::Impl::handle(const m::runtime::CompileScriptRequest &req) {
     auto source = std::make_shared<jsi::StringBuffer>(req.expression);
     std::shared_ptr<const jsi::PreparedJavaScript> preparedScript;
     try {
-      preparedScript = getRuntime().prepareJavaScript(source, req.sourceURL);
+      preparedScript = runtime_.prepareJavaScript(source, req.sourceURL);
     } catch (const facebook::jsi::JSIException &err) {
       resp.exceptionDetails = m::runtime::ExceptionDetails();
       resp.exceptionDetails->text = err.what();
@@ -1102,34 +1199,30 @@ void CDPHandler::Impl::handle(const m::runtime::EnableRequest &req) {
     note.context.name = "hermes";
     sendNotificationToClient(note);
 
-    if (numPendingConsoleMessagesDiscarded_ != 0) {
-      jsi::Runtime &rt = getRuntime();
+    if (numConsoleMessagesDiscardedFromCache_ != 0) {
+      jsi::Runtime &rt = runtime_;
       std::ostringstream oss;
-      oss << "Too many console messages were logged before devtool connected. "
-          << numPendingConsoleMessagesDiscarded_
-          << (numPendingConsoleMessagesDiscarded_ == 1 ? " message was"
-                                                       : " messages were")
+      oss << "Only limited number of console messages can be cached. "
+          << numConsoleMessagesDiscardedFromCache_
+          << (numConsoleMessagesDiscardedFromCache_ == 1 ? " message was"
+                                                         : " messages were")
           << " discarded at the beginning.";
       jsi::Array argsArray(rt, 1);
       argsArray.setValueAtIndex(rt, 0, oss.str());
-      emitConsoleAPICalledEvent(ConsoleMessageInfo{
-          pendingConsoleMessages_.front().timestamp - 0.1,
+      sendConsoleAPICalledEventToClient(ConsoleMessageInfo{
+          consoleMessageCache_.front().timestamp - 0.1,
           "warning",
           std::move(argsArray)});
-
-      numPendingConsoleMessagesDiscarded_ = 0;
     }
 
-    for (auto &msg : pendingConsoleMessages_) {
-      emitConsoleAPICalledEvent(std::move(msg));
+    for (auto &msg : consoleMessageCache_) {
+      sendConsoleAPICalledEventToClient(msg);
     }
-    pendingConsoleMessages_.clear();
   });
 }
 
 void CDPHandler::Impl::handle(const m::runtime::EvaluateRequest &req) {
   {
-    std::lock_guard<std::mutex> lock(mutex_);
     pendingEvals_.push(
         {req.id,
          0, // Top of the stackframe
@@ -1150,7 +1243,6 @@ void CDPHandler::Impl::handle(const m::debugger::PauseRequest &req) {
 void CDPHandler::Impl::handle(const m::debugger::RemoveBreakpointRequest &req) {
   enqueueFunc([this, req]() {
     if (isVirtualBreakpointId(req.breakpointId)) {
-      std::lock_guard<std::mutex> lock(virtualBreakpointMutex_);
       if (!removeVirtualBreakpoint(req.breakpointId)) {
         sendErrorToClient(req.id, "Unknown breakpoint ID: " + req.breakpointId);
       }
@@ -1271,7 +1363,6 @@ void CDPHandler::Impl::handle(
 
   // The act of creating and registering the breakpoint ID is enough
   // to "set" it. We merely check for the existence of them later.
-  std::lock_guard<std::mutex> lock(virtualBreakpointMutex_);
   m::debugger::SetInstrumentationBreakpointResponse resp;
   resp.id = req.id;
   resp.breakpointId = createVirtualBreakpoint(req.instrumentation);
@@ -1334,7 +1425,7 @@ CDPHandler::Impl::makePropsFromScope(
     m::runtime::PropertyDescriptor desc;
     desc.name = varInfo.name;
     desc.value = m::runtime::makeRemoteObject(
-        getRuntime(),
+        runtime_,
         varInfo.value,
         objTable_,
         objectGroup,
@@ -1353,7 +1444,7 @@ CDPHandler::Impl::makePropsFromScope(
     m::runtime::PropertyDescriptor desc;
     desc.name = varInfo.name;
     desc.value = m::runtime::makeRemoteObject(
-        getRuntime(),
+        runtime_,
         varInfo.value,
         objTable_,
         objectGroup,
@@ -1376,7 +1467,7 @@ CDPHandler::Impl::makePropsFromValue(
   std::vector<m::runtime::PropertyDescriptor> result;
 
   if (value.isObject()) {
-    jsi::Runtime &runtime = getRuntime();
+    jsi::Runtime &runtime = runtime_;
     jsi::Object obj = value.getObject(runtime);
 
     // TODO(hypuk): obj.getPropertyNames only returns enumerable properties.
@@ -1439,7 +1530,7 @@ CDPHandler::Impl::makePropsFromValue(
 void CDPHandler::Impl::handle(const m::runtime::GetHeapUsageRequest &req) {
   enqueueFunc([this, req]() {
     // getHeapInfo must be called from the runtime thread.
-    auto heapInfo = getRuntime().instrumentation().getHeapInfo(false);
+    auto heapInfo = runtime_.instrumentation().getHeapInfo(false);
     auto resp = std::make_shared<m::runtime::GetHeapUsageResponse>();
     resp->id = req.id;
     resp->usedSize = heapInfo["hermes_allocatedBytes"];
@@ -1524,9 +1615,8 @@ void CDPHandler::Impl::handle(
  */
 
 void CDPHandler::Impl::sendToClient(const std::string &str) {
-  std::lock_guard<std::mutex> lock(callbackMutex_);
-  if (callback_) {
-    callback_(str);
+  if (msgCallback_) {
+    msgCallback_(str);
   }
 }
 
@@ -1552,29 +1642,38 @@ bool CDPHandler::Impl::validateExecutionContext(
 /*
  * CDPHandler
  */
+std::shared_ptr<CDPHandler> CDPHandler::create(
+    std::unique_ptr<RuntimeAdapter> adapter,
+    const std::string &title,
+    bool waitForDebugger) {
+  // Can't use make_shared here since the constructor is private.
+  return std::shared_ptr<CDPHandler>(
+      new CDPHandler(std::move(adapter), title, waitForDebugger));
+}
+
 CDPHandler::CDPHandler(
     std::unique_ptr<RuntimeAdapter> adapter,
     const std::string &title,
     bool waitForDebugger)
     : impl_(
-          std::make_unique<Impl>(std::move(adapter), title, waitForDebugger)) {}
+          std::make_shared<Impl>(std::move(adapter), title, waitForDebugger)) {
+  impl_->installLogHandler();
+}
 
 CDPHandler::~CDPHandler() = default;
-
-HermesRuntime &CDPHandler::getRuntime() {
-  return impl_->getRuntime();
-}
 
 std::string CDPHandler::getTitle() const {
   return impl_->getTitle();
 }
 
-bool CDPHandler::registerCallback(CallbackFunction callback) {
-  return impl_->registerCallback(callback);
+bool CDPHandler::registerCallbacks(
+    CDPMessageCallbackFunction msgCallback,
+    OnUnregisterFunction onUnregister) {
+  return impl_->registerCallbacks(msgCallback, onUnregister);
 }
 
-void CDPHandler::unregisterCallback() {
-  return impl_->unregisterCallback();
+bool CDPHandler::unregisterCallbacks() {
+  return impl_->unregisterCallbacks();
 }
 
 void CDPHandler::handle(std::string str) {
@@ -1587,6 +1686,8 @@ bool CDPHandler::Impl::isAwaitingDebuggerOnStart() {
 
 void CDPHandler::Impl::triggerAsyncPause() {
   signal_.notify_one();
+  // Although it's generally unsafe to invoke the runtime from arbitrary
+  // threads, triggerAsyncPause is safe, as noted in the debugger API.
   getDebugger().triggerAsyncPause(debugger::AsyncPauseKind::Implicit);
   runtimeAdapter_->tickleJs();
 }
@@ -1608,24 +1709,21 @@ void CDPHandler::Impl::resetScriptsLoaded() {
 }
 
 void CDPHandler::Impl::sendPausedNotificationToClient() {
-  processPendingScriptLoads();
   m::debugger::PausedNotification note;
   note.reason = "other";
   note.callFrames = m::debugger::makeCallFrames(
-      getDebugger().getProgramState(), objTable_, getRuntime());
+      getDebugger().getProgramState(), objTable_, runtime_);
   sendNotificationToClient(note);
 }
 
 void CDPHandler::Impl::enqueueFunc(
     std::function<void(const debugger::ProgramState &state)> func) {
-  std::lock_guard<std::mutex> lock(mutex_);
   pendingFuncs_.push(func);
   triggerAsyncPause();
 }
 
 // Convenience wrapper for funcs that don't need program state
 void CDPHandler::Impl::enqueueFunc(std::function<void()> func) {
-  std::lock_guard<std::mutex> lock(mutex_);
   pendingFuncs_.push([func](const debugger::ProgramState &) { func(); });
   triggerAsyncPause();
 }
@@ -1634,12 +1732,11 @@ void CDPHandler::Impl::sendPauseOnExceptionNotification() {
   m::debugger::PausedNotification note;
   note.reason = "exception";
   note.callFrames = m::debugger::makeCallFrames(
-      getDebugger().getProgramState(), objTable_, getRuntime());
+      getDebugger().getProgramState(), objTable_, runtime_);
   sendNotificationToClient(note);
 }
 
 void CDPHandler::Impl::processPendingFuncs() {
-  std::lock_guard<std::mutex> lock(mutex_); // TODO: narrow
   while (!pendingFuncs_.empty()) {
     if (true) {
       auto func = pendingFuncs_.front();
@@ -1655,7 +1752,6 @@ void CDPHandler::Impl::processPendingFuncs() {
 }
 
 void CDPHandler::Impl::processPendingDesiredAttachments() {
-  std::lock_guard<std::mutex> lock(mutex_); // TODO: narrow
   while (!pendingDesiredAttachments_.empty()) {
     int requestId;
     Attachment desiredAttachment;
@@ -1673,6 +1769,13 @@ void CDPHandler::Impl::processPendingDesiredAttachments() {
 
 void CDPHandler::Impl::enableDebugger() {
   getDebugger().setIsDebuggerAttached(true);
+
+  // The debugger just got enabled; inform the client about all scripts.
+  // (i.e. mark all scripts as needing notification, then send all pending
+  // notifications).
+  resetScriptsLoaded();
+  processPendingScriptLoads();
+
   if (currentExecution_ == Execution::Paused) {
     sendPausedNotificationToClient();
   }
@@ -1694,7 +1797,6 @@ bool CDPHandler::Impl::isDebuggerDisabled() {
 
 void CDPHandler::Impl::processPendingDesiredExecutions(
     debugger::PauseReason pauseReason) {
-  std::lock_guard<std::mutex> lock(mutex_); // TODO: narrow
   Execution previousExecution = currentExecution_;
   while (!pendingDesiredExecutions_.empty()) {
     int requestId;
@@ -1737,14 +1839,11 @@ void CDPHandler::Impl::processPendingDesiredExecutions(
         m::debugger::PausedNotification note;
         note.reason = "other";
         note.callFrames = m::debugger::makeCallFrames(
-            getDebugger().getProgramState(), objTable_, getRuntime());
-        {
-          std::lock_guard<std::mutex> lock(virtualBreakpointMutex_);
-          note.hitBreakpoints = std::vector<m::debugger::BreakpointId>();
-          for (auto &bp :
-               virtualBreakpoints_[kBeforeScriptWithSourceMapExecution]) {
-            note.hitBreakpoints->emplace_back(bp);
-          }
+            getDebugger().getProgramState(), objTable_, runtime_);
+        note.hitBreakpoints = std::vector<m::debugger::BreakpointId>();
+        for (auto &bp :
+             virtualBreakpoints_[kBeforeScriptWithSourceMapExecution]) {
+          note.hitBreakpoints->emplace_back(bp);
         }
         sendNotificationToClient(note);
       }
@@ -1815,12 +1914,24 @@ Script CDPHandler::Impl::getScriptFromTopCallFrame() {
 }
 
 debugger::Command CDPHandler::Impl::didPause(debugger::Debugger &debugger) {
+  // Lock because this callback manipulates members.
+  std::unique_lock<std::recursive_mutex> lock(mutex_);
+
+  if (inDidPause_) {
+    throw std::runtime_error("unexpected recursive call to didPause");
+  }
+  inDidPause_ = true;
+  auto clearInDidPause = llvh::make_scope_exit([this] { inDidPause_ = false; });
+
   processPendingDesiredAttachments();
 
   if (getPauseReason() == debugger::PauseReason::ScriptLoaded) {
     processCurrentScriptLoaded();
   }
 
+  // Although the client was informed about the existing scripts after
+  // connecting, more scripts can start at any time. Notify the client about
+  // any scripts that have appeared since the last didPause.
   processPendingScriptLoads();
 
   processPendingDesiredExecutions(getPauseReason());
@@ -1840,7 +1951,7 @@ debugger::Command CDPHandler::Impl::didPause(debugger::Debugger &debugger) {
       bool byValue = evalReq.returnByValue.value_or(false);
       bool generatePreview = evalReq.generatePreview.value_or(false);
       *remoteObjPtr = m::runtime::makeRemoteObject(
-          getRuntime(),
+          runtime_,
           evalResult.value,
           objTable_,
           objectGroup,
@@ -1863,7 +1974,6 @@ debugger::Command CDPHandler::Impl::didPause(debugger::Debugger &debugger) {
   // this case, we should respect the pending eval over giving the debugger a
   // continue command, otherwise this eval would never be serviced.
   {
-    std::unique_lock<std::mutex> lock(mutex_);
     // There is currently a known issue with returning an eval command when the
     // runtime paused because of a script load. Therefore, we simply don't
     // process any evals if the pause reason is a script load.
@@ -1879,20 +1989,12 @@ debugger::Command CDPHandler::Impl::didPause(debugger::Debugger &debugger) {
   }
 
   while (true) {
-    {
-      std::unique_lock<std::mutex> lock(mutex_);
-      while (pendingEvals_.empty() && pendingDesiredExecutions_.empty() &&
-             pendingDesiredSteps_.empty() && pendingFuncs_.empty() &&
-             pendingDesiredAttachments_.empty()) {
-        signal_.wait(lock);
-      }
-    }
+    waitForAsyncPauseTrigger(lock);
     processPendingDesiredAttachments();
     processPendingDesiredExecutions(
         (debugger::PauseReason)-1); // TOOD: no pause reason here?
     processPendingFuncs();
     {
-      std::unique_lock<std::mutex> lock(mutex_);
       if (!pendingDesiredSteps_.empty()) {
         auto pair = pendingDesiredSteps_.front();
         pendingDesiredSteps_.pop();
@@ -1911,6 +2013,15 @@ debugger::Command CDPHandler::Impl::didPause(debugger::Debugger &debugger) {
         return debugger::Command::eval(evalReq.expression, evalReq.frameIdx);
       }
     }
+  }
+}
+
+void CDPHandler::Impl::waitForAsyncPauseTrigger(
+    std::unique_lock<std::recursive_mutex> &lock) {
+  while (pendingEvals_.empty() && pendingDesiredExecutions_.empty() &&
+         pendingDesiredSteps_.empty() && pendingFuncs_.empty() &&
+         pendingDesiredAttachments_.empty()) {
+    signal_.wait(lock);
   }
 }
 
@@ -1938,7 +2049,7 @@ static bool toBoolean(jsi::Runtime &runtime, const jsi::Value &val) {
 }
 
 void CDPHandler::Impl::installLogHandler() {
-  jsi::Runtime &rt = getRuntime();
+  jsi::Runtime &rt = runtime_;
   auto console = jsi::Object(rt);
   auto val = rt.global().getProperty(rt, "console");
   std::shared_ptr<jsi::Object> originalConsole;
@@ -1970,9 +2081,12 @@ void CDPHandler::Impl::installConsoleFunction(
     std::shared_ptr<jsi::Object> &originalConsole,
     const std::string &name,
     const std::string &chromeTypeDefault) {
-  jsi::Runtime &rt = getRuntime();
+  jsi::Runtime &rt = runtime_;
   auto chromeType = chromeTypeDefault == "" ? name : chromeTypeDefault;
   auto nameID = jsi::PropNameID::forUtf8(rt, name);
+  // We cannot capture `this` in the HostFunction, since it may outlive this
+  // Impl instance. Instead, we pass it a weak_ptr.
+  auto weakThis = std::weak_ptr<CDPHandler::Impl>(shared_from_this());
   console.setProperty(
       rt,
       nameID,
@@ -1980,7 +2094,7 @@ void CDPHandler::Impl::installConsoleFunction(
           rt,
           nameID,
           1,
-          [this, originalConsole, name, chromeType](
+          [weakThis = std::move(weakThis), originalConsole, name, chromeType](
               jsi::Runtime &runtime,
               const jsi::Value &thisVal,
               const jsi::Value *args,
@@ -1996,36 +2110,51 @@ void CDPHandler::Impl::installConsoleFunction(
               }
             }
 
-            if (name != "assert") {
-              // All cases other than assert just log a simple message.
-              jsi::Array argsArray(runtime, count);
-              for (size_t index = 0; index < count; ++index)
-                argsArray.setValueAtIndex(runtime, index, args[index]);
-              emitConsoleAPICalledEvent(ConsoleMessageInfo{
-                  currentTimestampMs(), chromeType, std::move(argsArray)});
-              return jsi::Value::undefined();
-            }
-            // console.assert needs to check the first parameter before
-            // logging.
-            if (count == 0) {
-              // No parameters, throw a blank assertion failed message.
-              emitConsoleAPICalledEvent(ConsoleMessageInfo{
-                  currentTimestampMs(), chromeType, jsi::Array(runtime, 0)});
-            } else if (!toBoolean(runtime, args[0])) {
-              // Shift the message array down by one to not include the
-              // condition.
-              jsi::Array argsArray(runtime, count - 1);
-              for (size_t index = 1; index < count; ++index)
-                argsArray.setValueAtIndex(runtime, index, args[index]);
-              emitConsoleAPICalledEvent(ConsoleMessageInfo{
-                  currentTimestampMs(), chromeType, std::move(argsArray)});
+            // If the Impl instance that created this HostFunction is still
+            // around, then we can use its instance methods to emit the proper
+            // CDP server event.
+            if (auto strongThis = weakThis.lock()) {
+              // Lock because this is a callback that manipulates members.
+              std::lock_guard<std::recursive_mutex> lock(strongThis->mutex_);
+
+              if (name != "assert") {
+                // All cases other than assert just log a simple message.
+                jsi::Array argsArray(runtime, count);
+                for (size_t index = 0; index < count; ++index)
+                  argsArray.setValueAtIndex(runtime, index, args[index]);
+                strongThis->handleConsoleAPI(ConsoleMessageInfo{
+                    strongThis->currentTimestampMs(),
+                    chromeType,
+                    std::move(argsArray)});
+                return jsi::Value::undefined();
+              }
+              // console.assert needs to check the first parameter before
+              // logging.
+              if (count == 0) {
+                // No parameters, throw a blank assertion failed message.
+                strongThis->handleConsoleAPI(ConsoleMessageInfo{
+                    strongThis->currentTimestampMs(),
+                    chromeType,
+                    jsi::Array(runtime, 0)});
+              } else if (!toBoolean(runtime, args[0])) {
+                // Shift the message array down by one to not include the
+                // condition.
+                jsi::Array argsArray(runtime, count - 1);
+                for (size_t index = 1; index < count; ++index)
+                  argsArray.setValueAtIndex(runtime, index, args[index]);
+                strongThis->handleConsoleAPI(ConsoleMessageInfo{
+                    strongThis->currentTimestampMs(),
+                    chromeType,
+                    std::move(argsArray)});
+              }
             }
 
+            // These console functions always return undefined.
             return jsi::Value::undefined();
           }));
 }
 
 } // namespace chrome
-} // namespace inspector
+} // namespace inspector_modern
 } // namespace hermes
 } // namespace facebook
