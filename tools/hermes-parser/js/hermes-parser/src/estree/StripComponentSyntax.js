@@ -38,27 +38,19 @@ import type {
   VariableDeclaration,
   ModuleDeclaration,
   Statement,
+  AssignmentPattern,
+  BindingName,
 } from 'hermes-estree';
 
 import {SimpleTransform} from '../transform/SimpleTransform';
 import {shallowCloneNode} from '../transform/astNodeMutationHelpers';
 import {SimpleTraverser} from '../traverse/SimpleTraverser';
+import {createSyntaxError} from '../utils/createSyntaxError';
 
 const nodeWith = SimpleTransform.nodeWith;
 
 // Rely on the mapper to fix up parent relationships.
 const EMPTY_PARENT: $FlowFixMe = null;
-
-function createSyntaxError(node: ESNode, err: string): SyntaxError {
-  const syntaxError = new SyntaxError(err);
-  // $FlowExpectedError[prop-missing]
-  syntaxError.loc = {
-    line: node.loc.start.line,
-    column: node.loc.start.column,
-  };
-
-  return syntaxError;
-}
 
 function createDefaultPosition(): Position {
   return {
@@ -158,7 +150,7 @@ function mapComponentParameters(
   params: $ReadOnlyArray<ComponentParameter | RestElement>,
 ): $ReadOnly<{
   props: ?(ObjectPattern | Identifier),
-  ref: ?Identifier,
+  ref: ?(BindingName | AssignmentPattern),
 }> {
   if (params.length === 0) {
     return {props: null, ref: null};
@@ -247,19 +239,7 @@ function mapComponentParameters(
 
   let ref = null;
   if (refParam != null) {
-    const refType = refParam.local;
-    ref = {
-      type: 'Identifier',
-      name: 'ref',
-      optional: false,
-      typeAnnotation:
-        refType.type === 'AssignmentPattern'
-          ? refType.left.typeAnnotation
-          : refType.typeAnnotation,
-      loc: refParam.loc,
-      range: refParam.range,
-      parent: EMPTY_PARENT,
-    };
+    ref = refParam.local;
   }
 
   return {
@@ -280,13 +260,6 @@ function mapComponentParameter(
       return a;
     }
     case 'ComponentParameter': {
-      if (getComponentParameterName(param.name) === 'ref') {
-        throw createSyntaxError(
-          param,
-          'Component parameters named "ref" are currently not supported',
-        );
-      }
-
       let value;
       if (param.local.type === 'AssignmentPattern') {
         value = nodeWith(param.local, {
@@ -424,46 +397,42 @@ function mapComponentDeclaration(node: ComponentDeclaration): {
   comp: FunctionDeclaration,
   forwardRefDetails: ?ForwardRefDetails,
 } {
-  let rendersType = node.rendersType;
-  if (rendersType == null) {
-    // Create empty loc for return type annotation nodes
-    const createRendersTypeLoc = () => ({
-      loc: {
-        start: node.body.loc.end,
-        end: node.body.loc.end,
-      },
-      range: [node.body.range[1], node.body.range[1]],
-      parent: EMPTY_PARENT,
-    });
-
-    rendersType = {
-      type: 'TypeAnnotation',
-      typeAnnotation: {
-        type: 'GenericTypeAnnotation',
-        id: {
-          type: 'QualifiedTypeIdentifier',
-          qualification: {
-            type: 'Identifier',
-            name: 'React',
-            optional: false,
-            typeAnnotation: null,
-            ...createRendersTypeLoc(),
-          },
-          id: {
-            type: 'Identifier',
-            name: 'Node',
-            optional: false,
-            typeAnnotation: null,
-            ...createRendersTypeLoc(),
-          },
+  // Create empty loc for return type annotation nodes
+  const createRendersTypeLoc = () => ({
+    loc: {
+      start: node.body.loc.end,
+      end: node.body.loc.end,
+    },
+    range: [node.body.range[1], node.body.range[1]],
+    parent: EMPTY_PARENT,
+  });
+  const returnType: TypeAnnotation = {
+    type: 'TypeAnnotation',
+    typeAnnotation: {
+      type: 'GenericTypeAnnotation',
+      id: {
+        type: 'QualifiedTypeIdentifier',
+        qualification: {
+          type: 'Identifier',
+          name: 'React',
+          optional: false,
+          typeAnnotation: null,
           ...createRendersTypeLoc(),
         },
-        typeParameters: null,
+        id: {
+          type: 'Identifier',
+          name: 'Node',
+          optional: false,
+          typeAnnotation: null,
+          ...createRendersTypeLoc(),
+        },
         ...createRendersTypeLoc(),
       },
+      typeParameters: null,
       ...createRendersTypeLoc(),
-    };
-  }
+    },
+    ...createRendersTypeLoc(),
+  };
 
   const {props, ref} = mapComponentParameters(node.params);
 
@@ -482,7 +451,7 @@ function mapComponentDeclaration(node: ComponentDeclaration): {
     __componentDeclaration: true,
     typeParameters: node.typeParameters,
     params: props == null ? [] : ref == null ? [props] : [props, ref],
-    returnType: rendersType,
+    returnType,
     body: node.body,
     async: false,
     generator: false,

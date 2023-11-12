@@ -13,6 +13,7 @@
 
 #include <gtest/gtest.h>
 
+#include <hermes/CompileJS.h>
 #include <hermes/DebuggerAPI.h>
 #include <hermes/hermes.h>
 #include <hermes/inspector/chrome/JSONValueInterfaces.h>
@@ -573,6 +574,63 @@ TEST_F(ConnectionTests, testScriptsOnEnable) {
   expectNotification<m::debugger::ScriptParsedNotification>(conn);
 }
 
+TEST_F(ConnectionTests, testScriptsOrdering) {
+  int msgId = 1;
+  std::vector<m::debugger::ScriptParsedNotification> notifications;
+
+  const int kNumScriptParsed = 10;
+
+  send<m::debugger::EnableRequest>(conn, msgId++);
+
+  // Trigger a bunch of scriptParsed notifications to later verify that they get
+  // re-sent in the same order
+  for (int i = 0; i < kNumScriptParsed; i++) {
+    asyncRuntime.executeScriptAsync(R"(
+      true
+    )");
+    auto notification =
+        expectNotification<m::debugger::ScriptParsedNotification>(conn);
+    notifications.push_back(notification);
+  }
+
+  // Make sure a new Debugger.enable will see the same ordering of scriptParsed
+  send<m::debugger::EnableRequest>(conn, msgId++);
+  for (int i = 0; i < kNumScriptParsed; i++) {
+    auto notification =
+        expectNotification<m::debugger::ScriptParsedNotification>(conn);
+    EXPECT_EQ(notifications[i].scriptId, notification.scriptId);
+  }
+
+  // Make sure the same ordering is retained after a disable request
+  send<m::debugger::DisableRequest>(conn, msgId++);
+  send<m::debugger::EnableRequest>(conn, msgId++);
+  for (int i = 0; i < kNumScriptParsed; i++) {
+    auto notification =
+        expectNotification<m::debugger::ScriptParsedNotification>(conn);
+    EXPECT_EQ(notifications[i].scriptId, notification.scriptId);
+  }
+}
+
+TEST_F(ConnectionTests, testBytecodeScript) {
+  int msgId = 1;
+  send<m::debugger::EnableRequest>(conn, msgId++);
+
+  // Compile code without debug info so that the SourceLocation would be
+  // invalid.
+  std::string bytecode;
+  EXPECT_TRUE(::hermes::compileJS(
+      R"(
+    true
+  )",
+      bytecode));
+
+  asyncRuntime.evaluateBytecodeAsync(bytecode);
+
+  // Verify that invalid SourceLocations simply don't trigger scriptParsed
+  // notifications
+  expectNothing(conn);
+}
+
 TEST_F(ConnectionTests, testRespondsErrorToUnknownRequests) {
   asyncRuntime.executeScriptAsync(R"(
     var a = 1 + 2;
@@ -779,6 +837,7 @@ TEST_F(ConnectionTests, testSetBreakpoint) {
   expectPaused(conn, "other", {{"global", 2, 1}});
 
   m::debugger::SetBreakpointByUrlRequest req;
+  req.url = kDefaultUrl;
   req.id = msgId++;
   req.lineNumber = 5;
   req.columnNumber = 0;
@@ -947,8 +1006,7 @@ TEST_F(ConnectionTests, testSetLazyBreakpoint) {
     }
 
     foo();
-  )",
-      "url");
+  )");
 
   send<m::debugger::EnableRequest>(conn, msgId++);
   expectNotification<m::debugger::ScriptParsedNotification>(conn);
@@ -957,6 +1015,7 @@ TEST_F(ConnectionTests, testSetLazyBreakpoint) {
   expectPaused(conn, "other", {{"global", 2, 1}});
 
   m::debugger::SetBreakpointByUrlRequest req;
+  req.url = kDefaultUrl;
   req.id = msgId++;
   req.lineNumber = 7;
   req.columnNumber = 0;
@@ -996,6 +1055,7 @@ TEST_F(ConnectionTests, testSetBreakpointWhileRunning) {
 
   // set breakpoint on line 4: "var c = ..."
   m::debugger::SetBreakpointByUrlRequest req;
+  req.url = kDefaultUrl;
   req.id = msgId++;
   req.lineNumber = 4;
   req.columnNumber = 0;
@@ -1042,6 +1102,7 @@ TEST_F(ConnectionTests, testSetBreakpointConditional) {
   expectPaused(conn, "other", {{"global", 2, 1}});
 
   m::debugger::SetBreakpointByUrlRequest req0;
+  req0.url = kDefaultUrl;
   req0.id = msgId++;
   req0.lineNumber = 4;
   req0.condition = std::optional<std::string>("throw Error('Boom!')");
@@ -1050,6 +1111,7 @@ TEST_F(ConnectionTests, testSetBreakpointConditional) {
   expectBreakpointResponse(conn, req0.id, 4, 4);
 
   m::debugger::SetBreakpointByUrlRequest req1;
+  req1.url = kDefaultUrl;
   req1.id = msgId++;
   req1.lineNumber = 5;
   req1.condition = std::optional<std::string>("b === a");
@@ -1058,6 +1120,7 @@ TEST_F(ConnectionTests, testSetBreakpointConditional) {
   expectBreakpointResponse(conn, req1.id, 5, 5);
 
   m::debugger::SetBreakpointByUrlRequest req2;
+  req2.url = kDefaultUrl;
   req2.id = msgId++;
   req2.lineNumber = 6;
   req2.condition = std::optional<std::string>("c === 5");
@@ -1102,6 +1165,7 @@ TEST_F(ConnectionTests, testRemoveBreakpoint) {
   expectPaused(conn, "other", {{"global", 2, 1}});
 
   m::debugger::SetBreakpointByUrlRequest req;
+  req.url = kDefaultUrl;
   req.id = msgId++;
   req.lineNumber = 7;
   conn.send(req.toJsonStr());
@@ -1681,6 +1745,7 @@ TEST_F(ConnectionTests, testDisable) {
 
   // set breakpoint on line 4: "var c = ..."
   m::debugger::SetBreakpointByUrlRequest req;
+  req.url = kDefaultUrl;
   req.id = msgId++;
   req.lineNumber = 4;
   conn.send(req.toJsonStr());
@@ -1718,6 +1783,7 @@ TEST_F(ConnectionTests, testDisableWhileRunning) {
 
   // set breakpoint on line 6: "var c = ..."
   m::debugger::SetBreakpointByUrlRequest req;
+  req.url = kDefaultUrl;
   req.id = msgId++;
   req.lineNumber = 6;
   conn.send(req.toJsonStr());
@@ -2570,6 +2636,7 @@ TEST_F(ConnectionTests, testSetBreakpointsMultipleScripts) {
   // Set breakpoint on line 2 in the first script and line 3 in the second
   // script.
   m::debugger::SetBreakpointByUrlRequest req1;
+  req1.url = kDefaultUrl;
   req1.id = msgId++;
   req1.lineNumber = 2;
   req1.url = url1;
@@ -2578,6 +2645,7 @@ TEST_F(ConnectionTests, testSetBreakpointsMultipleScripts) {
   expectBreakpointResponse(conn, req1.id, 2, 2);
 
   m::debugger::SetBreakpointByUrlRequest req2;
+  req2.url = kDefaultUrl;
   req2.id = msgId++;
   req2.lineNumber = 3;
   req2.url = url2;
@@ -2697,8 +2765,7 @@ TEST_F(ConnectionTests, testColumnBreakpoint) {
   asyncRuntime.executeScriptAsync(
       R"(
 function foo(){x=1}debugger;foo();
-)",
-      "url");
+)");
   send<m::debugger::EnableRequest>(conn, msgId++);
   expectNotification<m::debugger::ScriptParsedNotification>(conn);
 
@@ -2707,6 +2774,7 @@ function foo(){x=1}debugger;foo();
 
   // Set breakpoint on position 1:16 (x=1).
   m::debugger::SetBreakpointByUrlRequest req;
+  req.url = kDefaultUrl;
   req.id = msgId++;
   req.lineNumber = 1;
   req.columnNumber = 16;

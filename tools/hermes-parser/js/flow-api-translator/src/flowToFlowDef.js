@@ -12,6 +12,7 @@
 
 import type {
   AFunction,
+  AsExpression,
   BindingName,
   ClassBody,
   ClassDeclaration,
@@ -54,6 +55,7 @@ import type {
   TypeAnnotation,
   TypeAnnotationType,
   TypeCastExpression,
+  RendersType,
   TypeParameterDeclaration,
   TypeParameterInstantiation,
   VariableDeclaration,
@@ -418,6 +420,10 @@ function convertExpressionToTypeAnnotation(
   context: TranslationContext,
 ): TranslatedResult<TypeAnnotationType> {
   switch (expr.type) {
+    case 'AsExpression': {
+      const [resultExpr, deps] = convertAsExpression(expr, context);
+      return [resultExpr, deps];
+    }
     case 'TypeCastExpression': {
       const [resultExpr, deps] = convertTypeCastExpression(expr, context);
       return [resultExpr, deps];
@@ -1108,7 +1114,7 @@ function convertComponentDeclaration(
     }
 
     return [
-      asDetachedNode<TypeAnnotation>(rendersType),
+      asDetachedNode<RendersType>(rendersType),
       analyzeTypeDependencies(rendersType, context),
     ];
   })();
@@ -1401,6 +1407,17 @@ function convertOpaqueType(
     }),
     [...typeParamsDeps, ...supertypeDeps],
   ];
+}
+
+function convertAsExpression(
+  asExpression: AsExpression,
+  context: TranslationContext,
+): TranslatedResult<TypeAnnotationType> {
+  return convertTypeAnnotationType(
+    asExpression.typeAnnotation,
+    asExpression,
+    context,
+  );
 }
 
 function convertTypeCastExpression(

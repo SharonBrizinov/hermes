@@ -7,19 +7,46 @@
 add_hermes_library(compileJS CompileJS.cpp LINK_LIBS hermesPublic)
 
 if(HERMES_ENABLE_DEBUGGER)
-  add_subdirectory(inspector)
-  set(INSPECTOR_API_SOURCES inspector/RuntimeAdapter.cpp inspector/chrome/CDPHandler.cpp)
-  set(INSPECTOR_DEPS hermesInspector_rtti_exception)
+  if(HERMES_ENABLE_TOOLS AND NOT WIN32)
+    add_subdirectory(inspector/chrome/cli)
+  endif()
+
+  # Some inspector sources need to be built without RTTI because they consume
+  # internal data structures compiled without RTTI.
+  set(INSPECTOR_NO_EH_RTTI_SOURCES
+    inspector/chrome/JSONValueInterfaces.cpp
+    inspector/chrome/MessageConverters.cpp
+    inspector/chrome/MessageInterfaces.cpp
+    inspector/chrome/MessageTypes.cpp
+  )
+
+  if (NOT HERMES_ENABLE_EH_RTTI)
+    if (GCC_COMPATIBLE)
+      set_property(SOURCE ${INSPECTOR_NO_EH_RTTI_SOURCES} APPEND_STRING
+        PROPERTY COMPILE_FLAGS "-fno-exceptions -fno-rtti")
+    elseif (MSVC)
+      set_property(SOURCE ${INSPECTOR_NO_EH_RTTI_SOURCES} APPEND_STRING
+        PROPERTY COMPILE_FLAGS "/EHs-c- /GR-")
+    endif ()
+  endif ()
+
+  set(INSPECTOR_API_SOURCES
+    inspector/chrome/CallbackOStream.cpp
+    inspector/chrome/CDPHandler.cpp
+    inspector/chrome/RemoteObjectConverters.cpp
+    inspector/chrome/RemoteObjectsTable.cpp
+    inspector/RuntimeAdapter.cpp
+    ${INSPECTOR_NO_EH_RTTI_SOURCES}
+  )
+
+  # Even in lean builds, the inspector needs the parser to parse JSON.
+  set(INSPECTOR_DEPS hermesParser)
 endif()
 
-set(HERMES_ENABLE_EH ON)
-
-# synthTraceParser uses exceptions but not RTTI.
-# TODO(T127739425): Switch it to either use both exceptions and RTTI or neither.
 add_hermes_library(synthTraceParser SynthTraceParser.cpp LINK_LIBS hermesSupport hermesParser synthTrace)
 
 # All remaining targets in this file use both exceptions and RTTI.
-set(HERMES_ENABLE_RTTI ON)
+set(HERMES_ENABLE_EH_RTTI ON)
 
 # List the files that define exported functions explicitly, and they can link
 # against the internal functionality they need.
@@ -57,32 +84,22 @@ add_hermes_library(timerStats TimerStats.cpp LINK_LIBS jsi hermesSupport)
 add_hermes_library(traceInterpreter TraceInterpreter.cpp
   LINK_LIBS hermesapi hermesInstrumentation synthTrace synthTraceParser)
 
-set(HERMES_LINK_COMPONENTS LLVHSupport)
-
-add_library(libhermes SHARED ${api_sources})
-
-# This is configured using a cmake flag instead of a separate target, because
-# we need the output to be named "libhermes.so".
-set(LIBHERMES_VM_DEP hermesVMRuntime)
-if(HERMES_BUILD_LEAN_LIBHERMES)
-  set(LIBHERMES_VM_DEP hermesVMRuntimeLean)
-endif()
-
-target_link_libraries(libhermes
-  PRIVATE
-  jsi
-  ${LIBHERMES_VM_DEP}
-  ${INSPECTOR_DEPS}
-)
+add_library(libhermes ${api_sources})
+target_link_libraries(libhermes PRIVATE jsi hermesVMRuntime ${INSPECTOR_DEPS})
 target_link_options(libhermes PRIVATE ${HERMES_EXTRA_LINKER_FLAGS})
 
 # Export the required header directory
 target_include_directories(libhermes PUBLIC .. ../../public ${HERMES_JSI_DIR})
 
-set_target_properties(libhermes PROPERTIES
-  # Avoid becoming liblibhermes (and there's already a target called 'hermes')
-  OUTPUT_NAME hermes
-)
+# Avoid becoming liblibhermes (and there's already a target called 'hermes')
+set_target_properties(libhermes PROPERTIES OUTPUT_NAME hermes)
+
+# Create a lean version of libhermes in the same way.
+add_library(libhermes_lean ${api_sources})
+target_link_libraries(libhermes_lean PRIVATE jsi hermesVMRuntimeLean ${INSPECTOR_DEPS})
+target_link_options(libhermes_lean PRIVATE ${HERMES_EXTRA_LINKER_FLAGS})
+target_include_directories(libhermes_lean PUBLIC .. ../../public ${HERMES_JSI_DIR})
+set_target_properties(libhermes_lean PROPERTIES OUTPUT_NAME hermes_lean)
 
 if(APPLE AND HERMES_BUILD_APPLE_FRAMEWORK)
   set_target_properties(libhermes PROPERTIES
